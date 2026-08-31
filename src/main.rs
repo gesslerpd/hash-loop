@@ -1,5 +1,6 @@
 use rand::Rng;
-use sha2::{Digest, Sha256};
+use rayon::prelude::*;
+use sha1::{Digest, Sha1};
 use structopt::StructOpt;
 
 /// Search for a hash loop of any length.
@@ -19,25 +20,29 @@ fn fmt_hash(input: &[u8]) -> String {
 
 fn main() {
     let opt = Opt::from_args();
-    let mut rng = rand::thread_rng();
-    loop {
-        let seed: [u8; 32] = rng.gen();
-        println!("{} random hash seed", fmt_hash(&seed));
+    (0..rayon::current_num_threads())
+        .into_par_iter()
+        .for_each(|_| {
+            let mut rng = rand::thread_rng();
+            loop {
+                let seed: [u8; 32] = rng.gen();
+                println!("{} random hash seed", fmt_hash(&seed));
 
-        let mut slow = Sha256::digest(&seed);
-        let mut fast = Sha256::digest(&seed);
-        for _ in 0..opt.max {
-            if opt.verbose {
-                println!("{}", fmt_hash(&slow));
-            }
-            for _ in 0..2 {
-                fast = Sha256::digest(&fast);
-                if slow == fast {
-                    println!("{} hash found on cycle", fmt_hash(&slow));
-                    panic!("Don't panic, the search has ended!")
+                let mut slow = Sha1::digest(&seed);
+                let mut fast = Sha1::digest(&seed);
+                for _ in 0..opt.max {
+                    if opt.verbose {
+                        println!("{}", fmt_hash(&slow));
+                    }
+                    for _ in 0..2 {
+                        fast = Sha1::digest(&fast);
+                        if slow == fast {
+                            println!("{} hash found on cycle", fmt_hash(&slow));
+                            panic!("Don't panic, the search has ended!")
+                        }
+                    }
+                    slow = Sha1::digest(&slow);
                 }
             }
-            slow = Sha256::digest(&slow);
-        }
-    }
+        });
 }
