@@ -27,7 +27,7 @@ fn main() {
     let opt = Opt::from_args();
     (0..rayon::current_num_threads())
         .into_par_iter()
-        .for_each(|_| {
+        .for_each(|_thread_id| {
             let mut rng = rand::thread_rng();
             loop {
                 let seed: [u8; HASH_SIZE] = rng.gen();
@@ -40,10 +40,13 @@ fn main() {
                         println!("{}", fmt_hash(&slow));
                     }
                     for _ in 0..2 {
+                        // if _thread_id != 0 {
                         fast = Sha1::digest(&fast);
+                        // }
                         if slow == fast {
                             println!("{} hash found on cycle", fmt_hash(&slow));
-                            panic!("Don't panic, the search has ended!")
+                            println!("Don't panic, the search has ended!");
+                            std::process::exit(0)
                         }
                     }
                     slow = Sha1::digest(&slow);
