@@ -4,7 +4,7 @@ use sha1::{
     digest::{typenum::Unsigned, OutputSizeUser},
     Digest, Sha1,
 };
-use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use structopt::StructOpt;
 
 const HASH_SIZE: usize = <Sha1 as OutputSizeUser>::OutputSize::USIZE;
@@ -28,6 +28,9 @@ struct Opt {
     /// Enumerate the entire truncated state space and find the exact global minimum cycle (bits <= 30)
     #[structopt(long)]
     exhaustive: bool,
+    /// Stop exhaustive search after this many seconds and report the best cycle found so far
+    #[structopt(long)]
+    timeout_secs: Option<u64>,
     /// Switch on verbosity
     #[structopt(short)]
     verbose: bool,
@@ -112,32 +115,61 @@ fn next_index(idx: u32, bits: u8) -> u32 {
 }
 
 // Finds the exact global minimum cycle in a functional graph given as a `next[]`
-// adjacency array, using linear-time path coloring (no randomness, no sampling bias).
-fn min_cycle_in_graph(next: &[u32]) -> (u32, u64) {
-    let mut color = vec![0u8; next.len()];
+// adjacency array, using linear-time path coloring (no randomness, no hash map overhead).
+// Reports every improvement to `on_new_best` as soon as it is found, and checks
+// `deadline` periodically so a long search can be stopped and still report its best
+// result so far. Returns (best, states_processed, completed).
+fn min_cycle_in_graph_progressive<F: FnMut(u32, u64)>(
+    next: &[u32],
+    deadline: Option<Instant>,
+    mut on_new_best: F,
+) -> (Option<(u32, u64)>, u64, bool) {
+    let n = next.len();
+    let mut color = vec![0u8; n];
+    let mut path_position = vec![u32::MAX; n];
     let mut best: Option<(u32, u64)> = None;
     let mut path: Vec<u32> = Vec::new();
-    let mut position: HashMap<u32, usize> = HashMap::new();
+    let mut last_progress_report = Instant::now();
+    const CHECK_MASK: u32 = (1 << 18) - 1;
 
-    for start in 0..next.len() as u32 {
+    for start in 0..n as u32 {
+        if start & CHECK_MASK == 0 {
+            let now = Instant::now();
+            if let Some(deadline) = deadline {
+                if now >= deadline {
+                    return (best, start as u64, false);
+                }
+            }
+            if now.duration_since(last_progress_report).as_secs_f64() >= 2.0 {
+                eprintln!(
+                    "progress: {}/{} states processed ({:.1}%)",
+                    start,
+                    n,
+                    100.0 * start as f64 / n as f64
+                );
+                last_progress_report = now;
+            }
+        }
+
         if color[start as usize] != 0 {
             continue;
         }
 
         path.clear();
-        position.clear();
         let mut cursor = start;
         while color[cursor as usize] == 0 {
             color[cursor as usize] = 1;
-            position.insert(cursor, path.len());
+            path_position[cursor as usize] = path.len() as u32;
             path.push(cursor);
             cursor = next[cursor as usize];
         }
 
         if color[cursor as usize] == 1 {
-            let cycle_length = (path.len() - position[&cursor]) as u64;
+            let idx = path_position[cursor as usize] as usize;
+            let cycle_length = (path.len() - idx) as u64;
             if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
                 best = Some((cursor, cycle_length));
+                on_new_best(cursor, cycle_length);
             }
         }
 
@@ -146,18 +178,28 @@ fn min_cycle_in_graph(next: &[u32]) -> (u32, u64) {
         }
     }
 
-    best.expect("a finite functional graph always contains at least one cycle")
+    (best, n as u64, true)
 }
 
-fn exhaustive_min_cycle(bits: u8) -> (Hash, u64) {
+fn exhaustive_min_cycle<F: FnMut(Hash, u64)>(
+    bits: u8,
+    timeout: Option<Duration>,
+    mut on_new_best: F,
+) -> (Option<(Hash, u64)>, u64, u64, bool) {
     let n = 1usize << bits;
     let next: Vec<u32> = (0..n as u32)
         .into_par_iter()
         .map(|idx| next_index(idx, bits))
         .collect();
 
-    let (witness_index, cycle_length) = min_cycle_in_graph(&next);
-    (embed_index(witness_index, bits), cycle_length)
+    let deadline = timeout.map(|duration| Instant::now() + duration);
+    let (best, states_processed, completed) =
+        min_cycle_in_graph_progressive(&next, deadline, |idx, cycle_length| {
+            on_new_best(embed_index(idx, bits), cycle_length);
+        });
+
+    let best_hash = best.map(|(idx, cycle_length)| (embed_index(idx, bits), cycle_length));
+    (best_hash, states_processed, n as u64, completed)
 }
 
 fn find_cycle<F>(seed: Hash, max: u128, hash: F) -> Option<(Hash, u128)>
@@ -228,13 +270,40 @@ fn main() {
     }
 
     if opt.exhaustive {
-        let (cycle_hash, cycle_length) = exhaustive_min_cycle(opt.bits);
-        println!(
-            "{} {}-bit SHA-1 hash found on cycle of length {} (exhaustive, global minimum)",
-            fmt_hash(&cycle_hash),
-            opt.bits,
-            cycle_length
-        );
+        let timeout = opt.timeout_secs.map(Duration::from_secs);
+        let (best, states_processed, total_states, completed) =
+            exhaustive_min_cycle(opt.bits, timeout, |cycle_hash, cycle_length| {
+                println!(
+                    "{} {}-bit SHA-1 hash found on cycle of length {} (new best so far)",
+                    fmt_hash(&cycle_hash),
+                    opt.bits,
+                    cycle_length
+                );
+            });
+
+        match best {
+            Some((cycle_hash, cycle_length)) if completed => println!(
+                "{} {}-bit SHA-1 hash found on cycle of length {} (exhaustive, global minimum)",
+                fmt_hash(&cycle_hash),
+                opt.bits,
+                cycle_length
+            ),
+            Some((cycle_hash, cycle_length)) => println!(
+                "{} {}-bit SHA-1 hash found on cycle of length {} (exhaustive, partial: {}/{} states processed, not proven global minimum)",
+                fmt_hash(&cycle_hash),
+                opt.bits,
+                cycle_length,
+                states_processed,
+                total_states
+            ),
+            None => {
+                eprintln!(
+                    "exhaustive search stopped after {} of {} states without finding a cycle",
+                    states_processed, total_states
+                );
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -279,13 +348,29 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_cycle, min_cycle_in_graph, Hash, HASH_SIZE};
+    use super::{find_cycle, min_cycle_in_graph_progressive, Hash, HASH_SIZE};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn min_cycle_in_graph_finds_global_minimum() {
         let next: Vec<u32> = (0..8u32).map(|x| (x * 3 + 1) % 8).collect();
-        let (_, cycle_length) = min_cycle_in_graph(&next);
+        let (best, states_processed, completed) =
+            min_cycle_in_graph_progressive(&next, None, |_, _| {});
+        let (_, cycle_length) = best.expect("cycle should be found");
         assert_eq!(cycle_length, 4);
+        assert_eq!(states_processed, 8);
+        assert!(completed);
+    }
+
+    #[test]
+    fn min_cycle_in_graph_respects_deadline() {
+        let next: Vec<u32> = (0..8u32).map(|x| (x * 3 + 1) % 8).collect();
+        let past_deadline = Instant::now() - Duration::from_secs(1);
+        let (best, states_processed, completed) =
+            min_cycle_in_graph_progressive(&next, Some(past_deadline), |_, _| {});
+        assert!(!completed);
+        assert_eq!(states_processed, 0);
+        assert!(best.is_none());
     }
 
     fn toy_hash(input: &Hash) -> Hash {
