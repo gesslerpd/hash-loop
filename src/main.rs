@@ -1,7 +1,12 @@
 use rand::Rng;
 use rayon::prelude::*;
-use sha1::{Digest, Sha1};
+use sha1::{
+    digest::{typenum::Unsigned, OutputSizeUser},
+    Digest, Sha1,
+};
 use structopt::StructOpt;
+
+const HASH_SIZE: usize = <Sha1 as OutputSizeUser>::OutputSize::USIZE;
 
 /// Search for a hash loop of any length.
 #[derive(StructOpt)]
@@ -25,7 +30,7 @@ fn main() {
         .for_each(|_| {
             let mut rng = rand::thread_rng();
             loop {
-                let seed: [u8; 32] = rng.gen();
+                let seed: [u8; HASH_SIZE] = rng.gen();
                 println!("{} random hash seed", fmt_hash(&seed));
 
                 let mut slow = Sha1::digest(&seed);
