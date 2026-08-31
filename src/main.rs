@@ -29,7 +29,7 @@ fn main() {
                 println!("{} random hash seed", fmt_hash(&seed));
 
                 let mut slow = Sha1::digest(&seed);
-                let mut fast = Sha1::digest(&seed);
+                let mut fast = slow.clone();
                 for _ in 0..opt.max {
                     if opt.verbose {
                         println!("{}", fmt_hash(&slow));
