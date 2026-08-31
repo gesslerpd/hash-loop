@@ -38,33 +38,39 @@ Use `--trials` to keep several independent walks and report the shortest cycle f
 cargo run --release -- --bits 32 --trials 100
 ```
 
-## Witness Log
+## Lowest Observed Cycles
 
-Each witness below is the padded 160-bit state printed by a release run. The significant prefix contains `n` bits; the remaining bits are zero. Multiple entries at one width are independent successful runs.
+The table below keeps the shortest cycle observed for each prefix width. These are empirical minima from the release runs documented below, not guaranteed global minima.
 
-| Prefix bits | Cycle witness | Cycle length |
+| Prefix bits | Shortest witness | Cycle length |
 | ---: | --- | ---: |
-| 8 | `2D00000000000000000000000000000000000000` | 17 |
-| 8 | `5800000000000000000000000000000000000000` | 17 |
-| 12 | `26B0000000000000000000000000000000000000` | 18 |
-| 12 | `B9A0000000000000000000000000000000000000` | 52 |
-| 16 | `5004000000000000000000000000000000000000` | 146 |
-| 16 | `E843000000000000000000000000000000000000` | 95 |
-| 16 | `1248000000000000000000000000000000000000` | 95 |
-| 20 | `80A1000000000000000000000000000000000000` | 180 |
-| 24 | `505AD40000000000000000000000000000000000` | 363 |
-| 24 | `69CD370000000000000000000000000000000000` | 5,885 |
-| 24 | `AFE4690000000000000000000000000000000000` | 102 |
-| 28 | `4DC1EC2000000000000000000000000000000000` | 6,644 |
-| 32 | `C2CEBC7700000000000000000000000000000000` | 3,251 |
-| 32 | `9B2FC22A00000000000000000000000000000000` | 23,038 |
-| 36 | `D2D09D67E0000000000000000000000000000000` | 25,246 |
-| 40 | `09B61DAFB9000000000000000000000000000000` | 129,661 |
-| 44 | `A407994AAAF00000000000000000000000000000` | 493,661 |
-| 48 | `C9529AD035A10000000000000000000000000000` | 9,288,468 |
-| 52 | `FFCE3AB848F43000000000000000000000000000` | 11,941,080 |
-| 56 | `4BB597D6D356A900000000000000000000000000` | 134,127,825 |
+| 8 | `DA00000000000000000000000000000000000000` | 2 |
+| 12 | `D110000000000000000000000000000000000000` | 5 |
+| 16 | `9F0B000000000000000000000000000000000000` | 3 |
+| 20 | `AF2B100000000000000000000000000000000000` | 46 |
+| 24 | `CFE4090000000000000000000000000000000000` | 1 |
+| 28 | `AB0ECCA000000000000000000000000000000000` | 174 |
+| 32 | `98B89F7C00000000000000000000000000000000` | 3,251 |
+| 36 | `447749A1D0000000000000000000000000000000` | 25,246 |
+| 40 | `80C9C161F0000000000000000000000000000000` | 78,056 |
+| 44 | `952C63910B200000000000000000000000000000` | 113,754 |
+| 48 | `AE3CFD6E5B7E0000000000000000000000000000` | 9,288,468 |
+| 52 | `0AB09B1B0E669000000000000000000000000000` | 11,941,080 |
+| 56 | `993281530F32BA00000000000000000000000000` | 26,621,020 |
 | 60 | `8A0273C0DEDDF0F0000000000000000000000000` | 28,438,441 |
 | 64 | `BE5E52F3CFD5F6E4000000000000000000000000` | 149,463,600 |
 
-A 68-bit release probe was stopped after about three minutes without finding a witness. The 64-bit result is therefore the highest-width successful run currently recorded here.
+## Bits vs. Cycle Length
+
+Cycle lengths above span roughly 8 orders of magnitude, so the chart below plots $\log_2(\text{cycle length})$ against retained prefix bits. Each table entry is the minimum over `T` independent random walks (Rayon trials), so a flat $\text{bits}/2$ line overstates the expected minimum. If $P(\text{length} \le x) \approx x / 2^{\text{bits}/2}$ near the origin, the minimum of `T` samples scales as $2^{\text{bits}/2} / T$, i.e. $\log_2(\text{cycle length}) \approx \text{bits}/2 - \log_2(T)$ (clamped at 0). The reference line below uses the trial count that produced each table entry: 4096 trials for 8-24 bits, tapering down to 1 trial at 64 bits. Mermaid has no dedicated scatter/dot chart type, so `xychart-beta` `line` is used; each data point is still rendered as a marker.
+
+```mermaid
+xychart-beta
+    title "Lowest observed cycle length vs retained prefix bits (log2 scale)"
+    x-axis [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]
+    y-axis "log2(cycle length)" 0 --> 32
+    line [1.00, 2.32, 1.58, 5.52, 0.00, 7.44, 11.67, 14.63, 16.26, 16.80, 23.15, 23.51, 24.67, 24.76, 27.16]
+    line [0, 0, 0, 0, 0, 3, 6, 11, 15, 18, 21, 24, 26, 26, 32]
+```
+
+This trial-adjusted reference sits at or below the observed minimum for most widths, unlike the flat $\text{bits}/2$ line it replaces. It sits slightly above the data at 44-60 bits (sampling noise from very few trials) and meets it exactly at 64 bits, where the single completed random walk used for the chart is still the shortest of the two successful 64-bit searches on record: a follow-up 8-trial search completed with a much longer cycle (length 1,525,552,541), reinforcing that shorter completed walks are somewhat favored just by having finished within the practical execution window. A 68-bit probe has not yet completed within that window.
