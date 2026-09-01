@@ -25,7 +25,7 @@ struct Opt {
     /// Optional 160-bit state to replay instead of generating random seeds
     #[structopt(long)]
     seed: Option<String>,
-    /// Enumerate the entire truncated state space and find the exact global minimum cycle (bits <= 30)
+    /// Enumerate the entire truncated state space and find the exact global minimum cycle (bits <= 31)
     #[structopt(long)]
     exhaustive: bool,
     /// Stop exhaustive search after this many seconds and report the best cycle found so far
@@ -119,14 +119,19 @@ fn next_index(idx: u32, bits: u8) -> u32 {
 // Reports every improvement to `on_new_best` as soon as it is found, and checks
 // `deadline` periodically so a long search can be stopped and still report its best
 // result so far. Returns (best, states_processed, completed).
+//
+// `state[i]` packs both the color and in-path position into one u32 (halving memory vs.
+// separate color/position arrays): UNVISITED, DONE, or the node's index within the path
+// currently being traced. This requires n < DONE, true for bits <= 31.
 fn min_cycle_in_graph_progressive<F: FnMut(u32, u64)>(
     next: &[u32],
     deadline: Option<Instant>,
     mut on_new_best: F,
 ) -> (Option<(u32, u64)>, u64, bool) {
+    const UNVISITED: u32 = u32::MAX;
+    const DONE: u32 = u32::MAX - 1;
     let n = next.len();
-    let mut color = vec![0u8; n];
-    let mut path_position = vec![u32::MAX; n];
+    let mut state = vec![UNVISITED; n];
     let mut best: Option<(u32, u64)> = None;
     let mut path: Vec<u32> = Vec::new();
     let mut last_progress_report = Instant::now();
@@ -151,21 +156,20 @@ fn min_cycle_in_graph_progressive<F: FnMut(u32, u64)>(
             }
         }
 
-        if color[start as usize] != 0 {
+        if state[start as usize] != UNVISITED {
             continue;
         }
 
         path.clear();
         let mut cursor = start;
-        while color[cursor as usize] == 0 {
-            color[cursor as usize] = 1;
-            path_position[cursor as usize] = path.len() as u32;
+        while state[cursor as usize] == UNVISITED {
+            state[cursor as usize] = path.len() as u32;
             path.push(cursor);
             cursor = next[cursor as usize];
         }
 
-        if color[cursor as usize] == 1 {
-            let idx = path_position[cursor as usize] as usize;
+        if state[cursor as usize] != DONE {
+            let idx = state[cursor as usize] as usize;
             let cycle_length = (path.len() - idx) as u64;
             if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
                 best = Some((cursor, cycle_length));
@@ -174,7 +178,7 @@ fn min_cycle_in_graph_progressive<F: FnMut(u32, u64)>(
         }
 
         for &node in &path {
-            color[node as usize] = 2;
+            state[node as usize] = DONE;
         }
     }
 
@@ -264,8 +268,8 @@ fn main() {
         eprintln!("exhaustive search does not accept a seed");
         std::process::exit(2);
     }
-    if opt.exhaustive && opt.bits > 30 {
-        eprintln!("exhaustive search only supports bits <= 30 (2^30 states)");
+    if opt.exhaustive && opt.bits > 31 {
+        eprintln!("exhaustive search only supports bits <= 31 (2^31 states)");
         std::process::exit(2);
     }
 
