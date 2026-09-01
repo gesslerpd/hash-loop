@@ -5,6 +5,7 @@ use sha1::{
     Digest, Sha1,
 };
 use std::convert::TryFrom;
+use std::io::Write;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
 
@@ -1022,6 +1023,7 @@ fn flatten_seeds(seeds: &[Hash]) -> Vec<u32> {
 }
 
 fn cuda_find_cycles(
+    on_new_best: impl FnMut(Hash, u128),
     seeds: &[Hash],
     bits: u8,
     max: u128,
@@ -1033,6 +1035,7 @@ fn cuda_find_cycles(
     deadline: Option<Instant>,
 ) -> Result<Option<(Hash, u128)>, String> {
     use cudarc::driver::PushKernelArg;
+    let mut on_new_best = on_new_best;
 
     if max > u128::from(u64::MAX) {
         return Err("CUDA search supports maximum lengths up to 2^64 - 1".to_string());
@@ -1122,6 +1125,7 @@ fn cuda_find_cycles(
                 }
                 let cycle_length = u128::from(result[5]) | (u128::from(result[6]) << 32);
                 if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
+                    on_new_best(cycle_hash, cycle_length);
                     best = Some((cycle_hash, cycle_length));
                 }
             }
@@ -1411,6 +1415,15 @@ fn main() {
             }
         };
         match cuda_find_cycles(
+            |cycle_hash, cycle_length| {
+                println!(
+                    "{} {}-bit SHA-1 hash found on cycle of length {} (GPU new best so far)",
+                    fmt_hash(&cycle_hash),
+                    opt.bits,
+                    cycle_length
+                );
+                let _ = std::io::stdout().flush();
+            },
             &seeds,
             opt.bits,
             opt.max,
