@@ -15,7 +15,7 @@ type Hash = [u8; HASH_SIZE];
 #[derive(StructOpt)]
 struct Opt {
     /// Maximum search length, positive integer
-    #[structopt(default_value = "4294967296")]
+    #[structopt(default_value = "34359738368")]
     max: u128,
     /// Number of leading SHA-1 bits retained in each state
     #[structopt(long, default_value = "32")]

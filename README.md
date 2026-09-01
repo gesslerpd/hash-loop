@@ -30,7 +30,7 @@ OPTIONS:
     --gpu-block-size <n>  CUDA threads per block [default: 256]
 
 ARGS:
-    <max>    Maximum search length, positive integer [default: 4294967296]
+    <max>    Maximum search length, positive integer [default: 34359738368]
 ```
 
 ## Performance
@@ -88,6 +88,12 @@ Use the CUDA backend for sampled trials (not exhaustive search):
 
 ```
 cargo run --release -- --gpu --bits 32 --trials 100 --gpu-batch-size 65536
+```
+
+The default maximum search length is 34,359,738,368 ($2^{35}$), which gives Brent's cycle detector enough headroom to reach and confirm cycle lengths around the current 72-bit witness (10,300,411,851). The same limit can be supplied explicitly as the positional `max` argument:
+
+```
+cargo run --release -- --gpu --bits 72 --trials 100 --gpu-batch-size 65536 34359738368
 ```
 
 ## Lowest Observed Cycles
