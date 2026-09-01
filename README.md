@@ -23,6 +23,11 @@ OPTIONS:
     --trials <trials>  Number of independent seeds to test [default: 1]
     --exhaustive        Enumerate the entire truncated state space for the exact global minimum cycle (bits <= 31)
     --timeout-secs <n>  Stop exhaustive search after n seconds and report the best cycle found so far
+    --gpu               Run sampled trials on the CUDA GPU
+    --gpu-batch-size <n>  Number of sampled trials submitted in one GPU dispatch [default: 65536]
+    --gpu-benchmark     Run a fixed-transition GPU throughput benchmark instead of cycle search
+    --gpu-benchmark-hashes <n>  SHA-1 transitions per benchmark trial [default: 256]
+    --gpu-block-size <n>  CUDA threads per block [default: 256]
 
 ARGS:
     <max>    Maximum search length, positive integer [default: 4294967296]
@@ -44,6 +49,29 @@ This does not change what's fundamentally reachable: expected work still scales 
 
 `.cargo/config.toml` sets `target-cpu=native`, so builds are tuned for this machine's CPU and may not be portable to a different machine without adjusting or removing that file.
 
+### CUDA GPU performance
+
+The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
+
+Run the fixed-transition benchmark on Windows after adding the CUDA 13.3 DLL directories to `PATH`:
+
+```
+$env:Path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;$env:Path"
+.\target\x86_64-pc-windows-msvc\release\hash-loop.exe --gpu-benchmark --bits 160 --trials 1048576 --gpu-batch-size 65536 --gpu-benchmark-hashes 256 --gpu-block-size 256
+```
+
+Each run processed 1,048,576 independent trials, with 256 full 160-bit SHA-1 transitions per trial, for 268,435,456 total transitions:
+
+| CUDA block size | Elapsed | Throughput |
+| ---: | ---: | ---: |
+| 128 | 0.036 s | 7,391.64M hashes/sec |
+| 256 | 0.036 s | **7,554.33M hashes/sec** |
+| 512 | 0.036 s | 7,501.17M hashes/sec |
+
+The benchmark timing covers GPU kernel launch and synchronization for each batch. Seed upload, result download, allocation, and one-time NVRTC compilation are outside the timed interval. The best GPU result is about 9.1x the previously recorded 830.47M hashes/sec aggregate CPU result, but that comparison is directional: the CPU table measures a 32-bit Rayon workload, while this GPU benchmark measures full 160-bit chains.
+
+This throughput does not make full 160-bit cycle discovery practical. At 7.55 billion transitions per second, the expected $2^{80}$ work is still roughly 5 million years, before accounting for cycle-detection overhead. The GPU improves the number of independent trials that can be explored; it cannot parallelize the dependent transitions within one trial.
+
 Run the practical search in release mode:
 
 ```
@@ -54,6 +82,12 @@ Use `--trials` to keep several independent walks and report the shortest cycle f
 
 ```
 cargo run --release -- --bits 32 --trials 100
+```
+
+Use the CUDA backend for sampled trials (not exhaustive search):
+
+```
+cargo run --release -- --gpu --bits 32 --trials 100 --gpu-batch-size 65536
 ```
 
 ## Lowest Observed Cycles

@@ -4,6 +4,7 @@ use sha1::{
     digest::{typenum::Unsigned, OutputSizeUser},
     Digest, Sha1,
 };
+use std::convert::TryFrom;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
 
@@ -31,6 +32,21 @@ struct Opt {
     /// Stop the search after this many seconds and report the best cycle found so far
     #[structopt(long)]
     timeout_secs: Option<u64>,
+    /// Run sampled trials on the selected high-performance GPU
+    #[structopt(long)]
+    gpu: bool,
+    /// Number of sampled trials submitted in one GPU dispatch
+    #[structopt(long, default_value = "65536")]
+    gpu_batch_size: u64,
+    /// Run a fixed-transition GPU throughput benchmark instead of cycle search
+    #[structopt(long)]
+    gpu_benchmark: bool,
+    /// Number of SHA-1 transitions per benchmark trial
+    #[structopt(long, default_value = "256")]
+    gpu_benchmark_hashes: u32,
+    /// CUDA threads per block; benchmark several values for best throughput
+    #[structopt(long, default_value = "256")]
+    gpu_block_size: u32,
     /// Switch on verbosity
     #[structopt(short)]
     verbose: bool,
@@ -252,6 +268,879 @@ where
     Some((cycle_hash, cycle_length))
 }
 
+#[cfg(any())]
+mod wgpu_backend {
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GpuParams {
+        bits: u32,
+        max_low: u32,
+        max_high: u32,
+        _padding: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GpuResult {
+        hash: [u32; 5],
+        cycle_length_low: u32,
+        cycle_length_high: u32,
+        found: u32,
+    }
+
+    const GPU_SHADER: &str = r#"
+struct Params {
+    bits: u32,
+    max_low: u32,
+    max_high: u32,
+    padding: u32,
+};
+
+struct State {
+    words: array<u32, 5>,
+};
+
+struct Result {
+    hash: array<u32, 5>,
+    cycle_length_low: u32,
+    cycle_length_high: u32,
+    found: u32,
+};
+
+@group(0) @binding(0) var<storage, read> seeds: array<u32>;
+@group(0) @binding(1) var<storage, read_write> results: array<Result>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn rotate_left(value: u32, amount: u32) -> u32 {
+    return (value << amount) | (value >> (32u - amount));
+}
+
+fn truncate_state(input: State) -> State {
+    var output = input;
+    let full_words = params.bits / 32u;
+    let partial_bits = params.bits % 32u;
+    for (var index = 0u; index < 5u; index = index + 1u) {
+        if (partial_bits != 0u) {
+            if (index == full_words) {
+                output.words[index] = output.words[index] & (0xffffffffu << (32u - partial_bits));
+            } else if (index > full_words) {
+                output.words[index] = 0u;
+            }
+        } else if (index >= full_words) {
+            output.words[index] = 0u;
+        }
+    }
+    return output;
+}
+
+fn sha1_hash(input: State) -> State {
+    var schedule: array<u32, 80>;
+    schedule[0] = input.words[0];
+    schedule[1] = input.words[1];
+    schedule[2] = input.words[2];
+    schedule[3] = input.words[3];
+    schedule[4] = input.words[4];
+    for (var index = 5u; index < 15u; index = index + 1u) {
+        schedule[index] = 0u;
+    }
+    schedule[15] = 160u;
+    for (var index = 16u; index < 80u; index = index + 1u) {
+        schedule[index] = rotate_left(
+            schedule[index - 3u] ^ schedule[index - 8u] ^ schedule[index - 14u] ^ schedule[index - 16u],
+            1u,
+        );
+    }
+
+    var a = 0x67452301u;
+    var b = 0xefcdab89u;
+    var c = 0x98badcfeu;
+    var d = 0x10325476u;
+    var e = 0xc3d2e1f0u;
+
+    for (var index = 0u; index < 80u; index = index + 1u) {
+        var function_value = 0u;
+        var constant = 0u;
+        if (index < 20u) {
+            function_value = (b & c) | ((~b) & d);
+            constant = 0x5a827999u;
+        } else if (index < 40u) {
+            function_value = b ^ c ^ d;
+            constant = 0x6ed9eba1u;
+        } else if (index < 60u) {
+            function_value = (b & c) | (b & d) | (c & d);
+            constant = 0x8f1bbcdcu;
+        } else {
+            function_value = b ^ c ^ d;
+            constant = 0xca62c1d6u;
+        }
+        let temporary = rotate_left(a, 5u) + function_value + e + constant + schedule[index];
+        e = d;
+        d = c;
+        c = rotate_left(b, 30u);
+        b = a;
+        a = temporary;
+    }
+
+    var output: State;
+    output.words[0] = 0x67452301u + a;
+    output.words[1] = 0xefcdab89u + b;
+    output.words[2] = 0x98badcfeu + c;
+    output.words[3] = 0x10325476u + d;
+    output.words[4] = 0xc3d2e1f0u + e;
+    return truncate_state(output);
+}
+
+fn same_state(left: State, right: State) -> bool {
+    return left.words[0] == right.words[0]
+        && left.words[1] == right.words[1]
+        && left.words[2] == right.words[2]
+        && left.words[3] == right.words[3]
+        && left.words[4] == right.words[4];
+}
+
+fn below_limit(low: u32, high: u32) -> bool {
+    return high < params.max_high || (high == params.max_high && low < params.max_low);
+}
+
+fn increment_counter(low: ptr<function, u32>, high: ptr<function, u32>) {
+    *low = *low + 1u;
+    if (*low == 0u) {
+        *high = *high + 1u;
+    }
+}
+
+fn double_counter(low: ptr<function, u32>, high: ptr<function, u32>) {
+    let old_low = *low;
+    let old_high = *high;
+    *low = old_low << 1u;
+    *high = (old_high << 1u) | (old_low >> 31u);
+    if ((old_high & 0x80000000u) != 0u) {
+        *low = 0xffffffffu;
+        *high = 0xffffffffu;
+    }
+}
+
+fn load_seed(trial: u32) -> State {
+    let offset = trial * 5u;
+    var state: State;
+    state.words[0] = seeds[offset];
+    state.words[1] = seeds[offset + 1u];
+    state.words[2] = seeds[offset + 2u];
+    state.words[3] = seeds[offset + 3u];
+    state.words[4] = seeds[offset + 4u];
+    return state;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let trial = global_id.x;
+    if (trial >= arrayLength(&results)) {
+        return;
+    }
+
+    results[trial].found = 0u;
+    var tortoise = load_seed(trial);
+    var hare = sha1_hash(tortoise);
+    var power_low = 1u;
+    var power_high = 0u;
+    var length_low = 1u;
+    var length_high = 0u;
+    var steps_low = 1u;
+    var steps_high = 0u;
+
+    while (!same_state(tortoise, hare) && below_limit(steps_low, steps_high)) {
+        if (power_low == length_low && power_high == length_high) {
+            tortoise = hare;
+            double_counter(&power_low, &power_high);
+            length_low = 0u;
+            length_high = 0u;
+        }
+        hare = sha1_hash(hare);
+        increment_counter(&length_low, &length_high);
+        increment_counter(&steps_low, &steps_high);
+    }
+
+    if (!same_state(tortoise, hare)) {
+        return;
+    }
+
+    let cycle_hash = tortoise;
+    var cursor = sha1_hash(cycle_hash);
+    var cycle_length_low = 1u;
+    var cycle_length_high = 0u;
+    while (!same_state(cursor, cycle_hash) && below_limit(cycle_length_low, cycle_length_high)) {
+        cursor = sha1_hash(cursor);
+        increment_counter(&cycle_length_low, &cycle_length_high);
+    }
+
+    if (!same_state(cursor, cycle_hash)) {
+        return;
+    }
+
+    results[trial].hash[0] = cycle_hash.words[0];
+    results[trial].hash[1] = cycle_hash.words[1];
+    results[trial].hash[2] = cycle_hash.words[2];
+    results[trial].hash[3] = cycle_hash.words[3];
+    results[trial].hash[4] = cycle_hash.words[4];
+    results[trial].cycle_length_low = cycle_length_low;
+    results[trial].cycle_length_high = cycle_length_high;
+    results[trial].found = 1u;
+}
+"#;
+
+    fn gpu_find_cycles(
+        seeds: &[Hash],
+        bits: u8,
+        max: u128,
+        batch_size: usize,
+        verbose: bool,
+        deadline: Option<Instant>,
+    ) -> Result<Option<(Hash, u128)>, String> {
+        use wgpu::util::DeviceExt;
+
+        if max > u128::from(u64::MAX) {
+            return Err("GPU search supports maximum lengths up to 2^64 - 1".to_string());
+        }
+
+        let max = max as u64;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: wgpu::Dx12Compiler::Fxc,
+            flags: wgpu::InstanceFlags::default(),
+            gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok_or_else(|| "no suitable GPU adapter was found".to_string())?;
+        let adapter_info = adapter.get_info();
+        if verbose {
+            eprintln!(
+                "GPU adapter: {} ({:?}, backend {:?})",
+                adapter_info.name, adapter_info.device_type, adapter_info.backend
+            );
+        }
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("hash-loop device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        ))
+        .map_err(|error| format!("could not create GPU device: {}", error))?;
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hash-loop SHA-1 compute shader"),
+            source: wgpu::ShaderSource::Wgsl(GPU_SHADER.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hash-loop bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hash-loop pipeline layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("hash-loop SHA-1 pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "main",
+        });
+
+        let mut best: Option<(Hash, u128)> = None;
+        for batch in seeds.chunks(batch_size) {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+
+            let seed_words: Vec<u32> = batch
+                .iter()
+                .flat_map(|seed| {
+                    [
+                        u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]),
+                        u32::from_be_bytes([seed[4], seed[5], seed[6], seed[7]]),
+                        u32::from_be_bytes([seed[8], seed[9], seed[10], seed[11]]),
+                        u32::from_be_bytes([seed[12], seed[13], seed[14], seed[15]]),
+                        u32::from_be_bytes([seed[16], seed[17], seed[18], seed[19]]),
+                    ]
+                })
+                .collect();
+            let params = GpuParams {
+                bits: u32::from(bits),
+                max_low: max as u32,
+                max_high: (max >> 32) as u32,
+                _padding: 0,
+            };
+            let seed_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("hash-loop GPU seeds"),
+                contents: bytemuck::cast_slice(&seed_words),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("hash-loop GPU results"),
+                size: (batch.len() * std::mem::size_of::<GpuResult>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("hash-loop GPU parameters"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("hash-loop GPU result readback"),
+                size: (batch.len() * std::mem::size_of::<GpuResult>()) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("hash-loop bind group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: seed_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: result_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hash-loop GPU command encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("hash-loop SHA-1 compute pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(((batch.len() as u32) + 63) / 64, 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(
+                &result_buffer,
+                0,
+                &staging_buffer,
+                0,
+                (batch.len() * std::mem::size_of::<GpuResult>()) as u64,
+            );
+            queue.submit(Some(encoder.finish()));
+            let slice = staging_buffer.slice(..);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                sender.send(result).ok();
+            });
+            device.poll(wgpu::Maintain::Wait);
+            receiver
+                .recv()
+                .map_err(|error| format!("GPU result readback failed: {}", error))?
+                .map_err(|error| format!("GPU result mapping failed: {}", error))?;
+            let mapped = slice.get_mapped_range();
+            let gpu_results: &[GpuResult] = bytemuck::cast_slice(&mapped);
+            for result in gpu_results {
+                if result.found == 0 {
+                    continue;
+                }
+                let mut cycle_hash = [0u8; HASH_SIZE];
+                for (index, word) in result.hash.iter().enumerate() {
+                    cycle_hash[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+                }
+                let cycle_length = u128::from(result.cycle_length_low)
+                    | (u128::from(result.cycle_length_high) << 32);
+                if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
+                    best = Some((cycle_hash, cycle_length));
+                }
+            }
+            drop(mapped);
+            staging_buffer.unmap();
+        }
+
+        Ok(best)
+    }
+}
+
+const CUDA_SOURCE: &str = r#"
+typedef unsigned int uint;
+typedef unsigned long long ulong;
+
+__device__ __forceinline__ uint rotate_left(uint value, uint amount) {
+    return (value << amount) | (value >> (32u - amount));
+}
+
+__device__ __forceinline__ void copy_state(const uint source[5], uint destination[5]) {
+    destination[0] = source[0];
+    destination[1] = source[1];
+    destination[2] = source[2];
+    destination[3] = source[3];
+    destination[4] = source[4];
+}
+
+__device__ __forceinline__ bool same_state(const uint left[5], const uint right[5]) {
+    return left[0] == right[0] && left[1] == right[1] && left[2] == right[2]
+        && left[3] == right[3] && left[4] == right[4];
+}
+
+__device__ __forceinline__ bool below_limit(uint low, uint high, uint max_low, uint max_high) {
+    return high < max_high || (high == max_high && low < max_low);
+}
+
+__device__ __forceinline__ void increment_counter(uint &low, uint &high) {
+    low++;
+    if (low == 0u) {
+        high++;
+    }
+}
+
+__device__ __forceinline__ void double_counter(uint &low, uint &high) {
+    uint old_low = low;
+    uint old_high = high;
+    low = old_low << 1u;
+    high = (old_high << 1u) | (old_low >> 31u);
+    if ((old_high & 0x80000000u) != 0u) {
+        low = 0xffffffffu;
+        high = 0xffffffffu;
+    }
+}
+
+__device__ __forceinline__ void sha1_hash(const uint input[5], uint output[5], uint bits) {
+    uint schedule[16];
+    schedule[0] = input[0];
+    schedule[1] = input[1];
+    schedule[2] = input[2];
+    schedule[3] = input[3];
+    schedule[4] = input[4];
+    schedule[5] = 0u;
+    schedule[6] = 0u;
+    schedule[7] = 0u;
+    schedule[8] = 0u;
+    schedule[9] = 0u;
+    schedule[10] = 0u;
+    schedule[11] = 0u;
+    schedule[12] = 0u;
+    schedule[13] = 0u;
+    schedule[14] = 0u;
+    schedule[15] = 160u;
+
+    uint a = 0x67452301u;
+    uint b = 0xefcdab89u;
+    uint c = 0x98badcfeu;
+    uint d = 0x10325476u;
+    uint e = 0xc3d2e1f0u;
+    #pragma unroll 80
+    for (uint round = 0u; round < 80u; round++) {
+        uint schedule_word = schedule[round & 15u];
+        if (round >= 16u) {
+            schedule_word = rotate_left(
+                schedule[(round - 3u) & 15u] ^ schedule[(round - 8u) & 15u]
+                    ^ schedule[(round - 14u) & 15u] ^ schedule[round & 15u],
+                1u
+            );
+            schedule[round & 15u] = schedule_word;
+        }
+
+        uint function_value;
+        uint constant;
+        if (round < 20u) {
+            function_value = (b & c) | ((~b) & d);
+            constant = 0x5a827999u;
+        } else if (round < 40u) {
+            function_value = b ^ c ^ d;
+            constant = 0x6ed9eba1u;
+        } else if (round < 60u) {
+            function_value = (b & c) | (b & d) | (c & d);
+            constant = 0x8f1bbcdcu;
+        } else {
+            function_value = b ^ c ^ d;
+            constant = 0xca62c1d6u;
+        }
+        uint temporary = rotate_left(a, 5u) + function_value + e + constant + schedule_word;
+        e = d;
+        d = c;
+        c = rotate_left(b, 30u);
+        b = a;
+        a = temporary;
+    }
+
+    output[0] = 0x67452301u + a;
+    output[1] = 0xefcdab89u + b;
+    output[2] = 0x98badcfeu + c;
+    output[3] = 0x10325476u + d;
+    output[4] = 0xc3d2e1f0u + e;
+
+    uint full_words = bits / 32u;
+    uint partial_bits = bits & 31u;
+    if (partial_bits != 0u) {
+        output[full_words] &= 0xffffffffu << (32u - partial_bits);
+        for (uint index = full_words + 1u; index < 5u; index++) {
+            output[index] = 0u;
+        }
+    } else {
+        for (uint index = full_words; index < 5u; index++) {
+            output[index] = 0u;
+        }
+    }
+}
+
+extern "C" __global__ void find_cycles(
+    const uint *seeds,
+    uint *results,
+    uint bits,
+    uint max_low,
+    uint max_high,
+    uint trial_count
+) {
+    uint trial = blockIdx.x * blockDim.x + threadIdx.x;
+    if (trial >= trial_count) {
+        return;
+    }
+
+    uint tortoise[5];
+    uint hare[5];
+    uint next[5];
+    const uint *seed = seeds + trial * 5u;
+    tortoise[0] = seed[0];
+    tortoise[1] = seed[1];
+    tortoise[2] = seed[2];
+    tortoise[3] = seed[3];
+    tortoise[4] = seed[4];
+    sha1_hash(tortoise, hare, bits);
+
+    uint power_low = 1u;
+    uint power_high = 0u;
+    uint length_low = 1u;
+    uint length_high = 0u;
+    uint steps_low = 1u;
+    uint steps_high = 0u;
+    while (!same_state(tortoise, hare) && below_limit(steps_low, steps_high, max_low, max_high)) {
+        if (power_low == length_low && power_high == length_high) {
+            copy_state(hare, tortoise);
+            double_counter(power_low, power_high);
+            length_low = 0u;
+            length_high = 0u;
+        }
+        sha1_hash(hare, next, bits);
+        copy_state(next, hare);
+        increment_counter(length_low, length_high);
+        increment_counter(steps_low, steps_high);
+    }
+
+    uint *result = results + trial * 8u;
+    result[7] = 0u;
+    if (!same_state(tortoise, hare)) {
+        return;
+    }
+
+    uint cycle_hash[5];
+    uint cursor[5];
+    copy_state(tortoise, cycle_hash);
+    sha1_hash(cycle_hash, cursor, bits);
+    uint cycle_length_low = 1u;
+    uint cycle_length_high = 0u;
+    while (!same_state(cursor, cycle_hash)
+        && below_limit(cycle_length_low, cycle_length_high, max_low, max_high)) {
+        sha1_hash(cursor, next, bits);
+        copy_state(next, cursor);
+        increment_counter(cycle_length_low, cycle_length_high);
+    }
+    if (!same_state(cursor, cycle_hash)) {
+        return;
+    }
+
+    result[0] = cycle_hash[0];
+    result[1] = cycle_hash[1];
+    result[2] = cycle_hash[2];
+    result[3] = cycle_hash[3];
+    result[4] = cycle_hash[4];
+    result[5] = cycle_length_low;
+    result[6] = cycle_length_high;
+    result[7] = 1u;
+}
+
+extern "C" __global__ void benchmark_hashes(
+    const uint *seeds,
+    uint *outputs,
+    uint bits,
+    uint iterations,
+    uint trial_count
+) {
+    uint trial = blockIdx.x * blockDim.x + threadIdx.x;
+    if (trial >= trial_count) {
+        return;
+    }
+
+    uint state[5];
+    uint next[5];
+    const uint *seed = seeds + trial * 5u;
+    state[0] = seed[0];
+    state[1] = seed[1];
+    state[2] = seed[2];
+    state[3] = seed[3];
+    state[4] = seed[4];
+    for (uint iteration = 0u; iteration < iterations; iteration++) {
+        sha1_hash(state, next, bits);
+        copy_state(next, state);
+    }
+    outputs[trial] = state[0] ^ state[1] ^ state[2] ^ state[3] ^ state[4];
+}
+"#;
+
+fn cuda_device() -> Result<
+    (
+        std::sync::Arc<cudarc::driver::CudaContext>,
+        std::sync::Arc<cudarc::driver::CudaModule>,
+    ),
+    String,
+> {
+    use cudarc::driver::CudaContext;
+    use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+
+    let context =
+        CudaContext::new(0).map_err(|error| format!("could not open CUDA device 0: {}", error))?;
+    let ptx = compile_ptx_with_opts(
+        CUDA_SOURCE,
+        CompileOptions {
+            arch: Some("compute_86"),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("could not compile CUDA kernel with NVRTC: {}", error))?;
+    let module = context
+        .load_module(ptx)
+        .map_err(|error| format!("could not load CUDA PTX: {}", error))?;
+    Ok((context, module))
+}
+
+fn cuda_launch_config(trials: usize, block_size: u32) -> cudarc::driver::LaunchConfig {
+    cudarc::driver::LaunchConfig {
+        grid_dim: (((trials as u32) + block_size - 1) / block_size, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+fn flatten_seeds(seeds: &[Hash]) -> Vec<u32> {
+    seeds
+        .iter()
+        .flat_map(|seed| {
+            [
+                u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]),
+                u32::from_be_bytes([seed[4], seed[5], seed[6], seed[7]]),
+                u32::from_be_bytes([seed[8], seed[9], seed[10], seed[11]]),
+                u32::from_be_bytes([seed[12], seed[13], seed[14], seed[15]]),
+                u32::from_be_bytes([seed[16], seed[17], seed[18], seed[19]]),
+            ]
+        })
+        .collect()
+}
+
+fn cuda_find_cycles(
+    seeds: &[Hash],
+    bits: u8,
+    max: u128,
+    batch_size: usize,
+    block_size: u32,
+    verbose: bool,
+    deadline: Option<Instant>,
+) -> Result<Option<(Hash, u128)>, String> {
+    use cudarc::driver::PushKernelArg;
+
+    if max > u128::from(u64::MAX) {
+        return Err("CUDA search supports maximum lengths up to 2^64 - 1".to_string());
+    }
+    if seeds.len() > u32::MAX as usize || batch_size > u32::MAX as usize {
+        return Err("CUDA search supports at most 2^32 - 1 trials per dispatch".to_string());
+    }
+    let (context, module) = cuda_device()?;
+    let function = module
+        .load_function("find_cycles")
+        .map_err(|error| format!("could not load CUDA cycle kernel: {}", error))?;
+    let stream = context.default_stream();
+    if verbose {
+        eprintln!(
+            "CUDA device 0: {}",
+            context.name().unwrap_or_else(|_| "unknown".to_string())
+        );
+    }
+    let max = max as u64;
+    let mut best: Option<(Hash, u128)> = None;
+    for batch in seeds.chunks(batch_size) {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break;
+        }
+        let seed_words = flatten_seeds(batch);
+        let device_seeds = stream
+            .clone_htod(&seed_words)
+            .map_err(|error| format!("could not upload CUDA seeds: {}", error))?;
+        let mut device_results = stream
+            .alloc_zeros::<u32>(batch.len() * 8)
+            .map_err(|error| format!("could not allocate CUDA results: {}", error))?;
+        let config = cuda_launch_config(batch.len(), block_size);
+        unsafe {
+            stream
+                .launch_builder(&function)
+                .arg(&device_seeds)
+                .arg(&mut device_results)
+                .arg(&u32::from(bits))
+                .arg(&(max as u32))
+                .arg(&((max >> 32) as u32))
+                .arg(&(batch.len() as u32))
+                .launch(config)
+                .map_err(|error| format!("CUDA cycle kernel failed: {}", error))?;
+        }
+        stream
+            .synchronize()
+            .map_err(|error| format!("CUDA synchronization failed: {}", error))?;
+        let results = stream
+            .clone_dtoh(&device_results)
+            .map_err(|error| format!("could not download CUDA results: {}", error))?;
+        for result in results.chunks_exact(8) {
+            if result[7] == 0 {
+                continue;
+            }
+            let mut cycle_hash = [0u8; HASH_SIZE];
+            for index in 0..5 {
+                cycle_hash[index * 4..index * 4 + 4].copy_from_slice(&result[index].to_be_bytes());
+            }
+            let cycle_length = u128::from(result[5]) | (u128::from(result[6]) << 32);
+            if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
+                best = Some((cycle_hash, cycle_length));
+            }
+        }
+    }
+    Ok(best)
+}
+
+fn cuda_benchmark(
+    bits: u8,
+    trials: usize,
+    batch_size: usize,
+    block_size: u32,
+    iterations: u32,
+    verbose: bool,
+) -> Result<(u128, f64, u32), String> {
+    use cudarc::driver::PushKernelArg;
+
+    if trials > u32::MAX as usize || batch_size > u32::MAX as usize {
+        return Err("CUDA benchmark supports at most 2^32 - 1 trials per dispatch".to_string());
+    }
+    if iterations == 0 {
+        return Err("GPU benchmark iterations must be greater than zero".to_string());
+    }
+    let (context, module) = cuda_device()?;
+    let benchmark_function = module
+        .load_function("benchmark_hashes")
+        .map_err(|error| format!("could not load CUDA benchmark kernel: {}", error))?;
+    let stream = context.default_stream();
+    if verbose {
+        eprintln!(
+            "CUDA device 0: {}",
+            context.name().unwrap_or_else(|_| "unknown".to_string())
+        );
+    }
+    let mut rng = rand::thread_rng();
+    let seed_words: Vec<u32> = (0..trials * 5).map(|_| rng.gen()).collect();
+    let warmup_len = trials.min(batch_size);
+    let warmup_seeds = stream
+        .clone_htod(&seed_words[..warmup_len * 5])
+        .map_err(|error| format!("could not upload CUDA benchmark seeds: {}", error))?;
+    let mut warmup_results = stream
+        .alloc_zeros::<u32>(warmup_len)
+        .map_err(|error| format!("could not allocate CUDA benchmark results: {}", error))?;
+    unsafe {
+        stream
+            .launch_builder(&benchmark_function)
+            .arg(&warmup_seeds)
+            .arg(&mut warmup_results)
+            .arg(&u32::from(bits))
+            .arg(&iterations)
+            .arg(&(warmup_len as u32))
+            .launch(cuda_launch_config(warmup_len, block_size))
+            .map_err(|error| format!("CUDA benchmark warmup failed: {}", error))?;
+    }
+    stream
+        .synchronize()
+        .map_err(|error| format!("CUDA warmup synchronization failed: {}", error))?;
+
+    let mut sink = 0u32;
+    let mut elapsed = 0.0;
+    for start in (0..trials).step_by(batch_size) {
+        let count = (trials - start).min(batch_size);
+        let device_seeds = stream
+            .clone_htod(&seed_words[start * 5..(start + count) * 5])
+            .map_err(|error| format!("could not upload CUDA benchmark seeds: {}", error))?;
+        let mut device_results = stream
+            .alloc_zeros::<u32>(count)
+            .map_err(|error| format!("could not allocate CUDA benchmark results: {}", error))?;
+        let begin = Instant::now();
+        unsafe {
+            stream
+                .launch_builder(&benchmark_function)
+                .arg(&device_seeds)
+                .arg(&mut device_results)
+                .arg(&u32::from(bits))
+                .arg(&iterations)
+                .arg(&(count as u32))
+                .launch(cuda_launch_config(count, block_size))
+                .map_err(|error| format!("CUDA benchmark kernel failed: {}", error))?;
+        }
+        stream
+            .synchronize()
+            .map_err(|error| format!("CUDA benchmark synchronization failed: {}", error))?;
+        elapsed += begin.elapsed().as_secs_f64();
+        let results = stream
+            .clone_dtoh(&device_results)
+            .map_err(|error| format!("could not download CUDA benchmark results: {}", error))?;
+        for value in results {
+            sink ^= value;
+        }
+    }
+    let total_hashes = (trials as u128) * u128::from(iterations);
+    Ok((total_hashes, elapsed, sink))
+}
+
 fn main() {
     let opt = Opt::from_args();
     if opt.max == 0 {
@@ -276,6 +1165,34 @@ fn main() {
     }
     if opt.exhaustive && opt.bits > 31 {
         eprintln!("exhaustive search only supports bits <= 31 (2^31 states)");
+        std::process::exit(2);
+    }
+    if opt.gpu_batch_size == 0 {
+        eprintln!("gpu-batch-size must be greater than zero");
+        std::process::exit(2);
+    }
+    if opt.gpu && opt.exhaustive {
+        eprintln!("GPU acceleration is available for sampled trials, not exhaustive search");
+        std::process::exit(2);
+    }
+    if (opt.gpu || opt.gpu_benchmark)
+        && (opt.gpu_block_size < 32
+            || opt.gpu_block_size > 1024
+            || !opt.gpu_block_size.is_power_of_two())
+    {
+        eprintln!("gpu-block-size must be a power of two between 32 and 1024");
+        std::process::exit(2);
+    }
+    if opt.gpu_benchmark_hashes == 0 {
+        eprintln!("gpu-benchmark-hashes must be greater than zero");
+        std::process::exit(2);
+    }
+    if opt.gpu_benchmark && opt.exhaustive {
+        eprintln!("GPU benchmark does not support exhaustive search");
+        std::process::exit(2);
+    }
+    if opt.gpu_benchmark && opt.seed.is_some() {
+        eprintln!("GPU benchmark does not accept a seed");
         std::process::exit(2);
     }
 
@@ -317,11 +1234,95 @@ fn main() {
         return;
     }
 
+    if opt.gpu_benchmark {
+        let trials = match usize::try_from(opt.trials) {
+            Ok(trials) if trials > 0 => trials,
+            _ => {
+                eprintln!("trials is too large for this platform");
+                std::process::exit(2);
+            }
+        };
+        let batch_size = match usize::try_from(opt.gpu_batch_size) {
+            Ok(batch_size) if batch_size > 0 => batch_size,
+            _ => {
+                eprintln!("gpu-batch-size is too large for this platform");
+                std::process::exit(2);
+            }
+        };
+        match cuda_benchmark(
+            opt.bits,
+            trials,
+            batch_size,
+            opt.gpu_block_size,
+            opt.gpu_benchmark_hashes,
+            opt.verbose,
+        ) {
+            Ok((total_hashes, elapsed, sink)) => println!(
+                "GPU benchmark: {} trials x {} SHA-1 transitions = {} hashes in {:.3}s = {:.2}M hashes/sec (sink: {:08X})",
+                opt.trials,
+                opt.gpu_benchmark_hashes,
+                total_hashes,
+                elapsed,
+                total_hashes as f64 / elapsed / 1e6,
+                sink
+            ),
+            Err(error) => {
+                eprintln!("GPU benchmark failed: {}", error);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let sample_deadline = opt
         .timeout_secs
         .map(|secs| Instant::now() + Duration::from_secs(secs));
 
-    let result = if let Some(seed_text) = opt.seed.as_deref() {
+    let result = if opt.gpu {
+        let seeds = if let Some(seed_text) = opt.seed.as_deref() {
+            let seed = match parse_hash(seed_text) {
+                Ok(seed) => seed,
+                Err(error) => {
+                    eprintln!("invalid seed: {}", error);
+                    std::process::exit(2);
+                }
+            };
+            vec![seed]
+        } else {
+            (0..opt.trials)
+                .map(|_| {
+                    let mut rng = rand::thread_rng();
+                    let seed = truncate_hash(rng.gen(), opt.bits);
+                    if opt.verbose {
+                        println!("{} random hash seed", fmt_hash(&seed));
+                    }
+                    seed
+                })
+                .collect()
+        };
+        let gpu_batch_size = match usize::try_from(opt.gpu_batch_size) {
+            Ok(batch_size) if batch_size > 0 => batch_size,
+            _ => {
+                eprintln!("gpu-batch-size is too large for this platform");
+                std::process::exit(2);
+            }
+        };
+        match cuda_find_cycles(
+            &seeds,
+            opt.bits,
+            opt.max,
+            gpu_batch_size,
+            opt.gpu_block_size,
+            opt.verbose,
+            sample_deadline,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("GPU search failed: {}", error);
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(seed_text) = opt.seed.as_deref() {
         let seed = match parse_hash(seed_text) {
             Ok(seed) => seed,
             Err(error) => {

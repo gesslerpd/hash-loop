@@ -11,6 +11,8 @@ rand = "*"
 structopt = "*"
 sha1 = "*"
 rayon = "*"
+bytemuck = { version = "1", features = ["derive"] }
+cudarc = { version = "0.19", features = ["cuda-13000", "driver", "nvrtc"] }
 
 [profile.release]
 lto = true
