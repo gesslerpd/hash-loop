@@ -26,6 +26,9 @@ struct Opt {
     /// Number of independent seeds to test
     #[structopt(long, default_value = "1")]
     trials: u64,
+    /// Number of fresh random seed batches to test on the GPU
+    #[structopt(long, default_value = "4")]
+    gpu_restarts: u64,
     /// Optional 160-bit state to replay instead of generating random seeds
     #[structopt(long)]
     seed: Option<String>,
@@ -1221,8 +1224,16 @@ fn main() {
         eprintln!("trials must be greater than zero");
         std::process::exit(2);
     }
+    if opt.gpu_restarts == 0 {
+        eprintln!("gpu-restarts must be greater than zero");
+        std::process::exit(2);
+    }
     if opt.seed.is_some() && opt.trials != 1 {
         eprintln!("seed replay requires exactly one trial");
+        std::process::exit(2);
+    }
+    if opt.gpu && opt.seed.is_some() && opt.gpu_restarts != 1 {
+        eprintln!("GPU seed replay requires exactly one GPU restart");
         std::process::exit(2);
     }
     if !(1..=160).contains(&opt.bits) {
@@ -1353,6 +1364,13 @@ fn main() {
         .map(|secs| Instant::now() + Duration::from_secs(secs));
 
     let result = if opt.gpu {
+        let total_gpu_trials = match opt.trials.checked_mul(opt.gpu_restarts) {
+            Some(total_trials) => total_trials,
+            None => {
+                eprintln!("trials multiplied by gpu-restarts is too large");
+                std::process::exit(2);
+            }
+        };
         let seeds = if let Some(seed_text) = opt.seed.as_deref() {
             let seed = match parse_hash(seed_text) {
                 Ok(seed) => seed,
@@ -1363,7 +1381,7 @@ fn main() {
             };
             vec![seed]
         } else {
-            (0..opt.trials)
+            (0..total_gpu_trials)
                 .map(|_| {
                     let mut rng = rand::thread_rng();
                     let seed = truncate_hash(rng.gen(), opt.bits);
@@ -1435,13 +1453,19 @@ fn main() {
             .min_by_key(|(_, cycle_length)| *cycle_length)
     };
 
+    let reported_trials = if opt.gpu {
+        opt.trials.saturating_mul(opt.gpu_restarts)
+    } else {
+        opt.trials
+    };
+
     if let Some((cycle_hash, cycle_length)) = result {
         println!(
             "{} {}-bit SHA-1 hash found on cycle of length {} after {} trial(s)",
             fmt_hash(&cycle_hash),
             opt.bits,
             cycle_length,
-            opt.trials
+            reported_trials
         );
     } else {
         eprintln!("no cycle found within the configured search limits");
@@ -1462,6 +1486,7 @@ mod tests {
     fn default_search_limit_reaches_ten_billion_cycle_lengths() {
         let opt = Opt::from_iter_safe(["hash-loop"]).expect("default arguments should parse");
         assert!(opt.max >= 10_300_411_851);
+        assert_eq!(opt.gpu_restarts, 4);
         assert_eq!(opt.gpu_steps_per_dispatch, 65_536);
     }
 

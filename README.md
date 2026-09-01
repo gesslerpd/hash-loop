@@ -22,6 +22,7 @@ OPTIONS:
     --max-cycle-length <n>  Ignore cycles whose length is not less than this value
     --bits <bits>      Number of leading SHA-1 bits retained in each state [default: 32]
     --trials <trials>  Number of independent seeds to test [default: 1]
+    --gpu-restarts <n>  Number of fresh random seed batches to test on the GPU [default: 4]
     --exhaustive        Enumerate the entire truncated state space for the exact global minimum cycle (bits <= 31)
     --timeout-secs <n>  Stop exhaustive search after n seconds and report the best cycle found so far
     --gpu               Run sampled trials on the CUDA GPU
@@ -53,7 +54,7 @@ This does not change what's fundamentally reachable: expected work still scales 
 
 ### CUDA GPU performance
 
-The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. Cycle-search state is retained between bounded kernel dispatches, so a trial can reach long cycle lengths without requiring one watchdog-prone kernel. `--gpu-steps-per-dispatch` controls that chunk size; 65,536 is a practical default for Windows WDDM. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
+The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. Cycle-search state is retained between bounded kernel dispatches, so a trial can reach long cycle lengths without requiring one watchdog-prone kernel. `--gpu-steps-per-dispatch` controls that chunk size; 65,536 is a practical default for Windows WDDM. GPU sampled searches use four fresh random seed batches by default; increase or reduce this with `--gpu-restarts`. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
 
 Run the fixed-transition benchmark on Windows after adding the CUDA 13.3 DLL directories to `PATH`:
 
@@ -62,17 +63,30 @@ $env:Path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Pro
 .\target\x86_64-pc-windows-msvc\release\hash-loop.exe --gpu-benchmark --bits 160 --trials 1048576 --gpu-batch-size 65536 --gpu-benchmark-hashes 256 --gpu-block-size 256
 ```
 
-Each run processed 1,048,576 independent trials, with 256 full 160-bit SHA-1 transitions per trial, for 268,435,456 total transitions:
+Each run processed 1,048,576 independent trials, with 256 full 160-bit SHA-1 transitions per trial, for 268,435,456 total transitions. Averaged over 3 runs per block size at the default `--gpu-batch-size 65536`:
 
 | CUDA block size | Elapsed | Throughput |
 | ---: | ---: | ---: |
-| 128 | 0.036 s | 7,391.64M hashes/sec |
-| 256 | 0.036 s | **7,513.62M hashes/sec** |
-| 512 | 0.036 s | 7,501.17M hashes/sec |
+| 128 | 0.036 s | 7,482.75M hashes/sec |
+| 256 | 0.036 s | 7,547.93M hashes/sec |
+| 512 | 0.036 s | **7,567.49M hashes/sec** |
 
-The benchmark timing covers GPU kernel launch and synchronization for each batch. Seed upload, result download, allocation, and one-time NVRTC compilation are outside the timed interval. The best GPU result is about 9.1x the previously recorded 830.47M hashes/sec aggregate CPU result, but that comparison is directional: the CPU table measures a 32-bit Rayon workload, while this GPU benchmark measures full 160-bit chains.
+Block size alone makes little difference (within run-to-run noise) as long as `--gpu-batch-size` stays at its default of 65,536. The bigger lever turned out to be batch size itself: at 65,536 trials per dispatch, a 1,048,576-trial run needs 16 separate kernel launches, and launch/sync overhead dominates the timed interval. Raising `--gpu-batch-size` to match (or approach) the total trial count collapses that to one dispatch:
 
-This throughput does not make full 160-bit cycle discovery practical. At 7.55 billion transitions per second, the expected $2^{80}$ work is still roughly 5 million years, before accounting for cycle-detection overhead. The GPU improves the number of independent trials that can be explored; it cannot parallelize the dependent transitions within one trial.
+| `--gpu-batch-size` | Block size | Throughput |
+| ---: | ---: | ---: |
+| 65,536 (default) | 512 | 7,567.49M hashes/sec |
+| 1,048,576 (= trial count) | 512 | **8,524.05M hashes/sec** |
+
+That is a genuine +13% improvement at the same trial count and hardware, not measurement noise — confirmed at larger scale too: 16,777,216 trials in one batch sustained 8,519.91M hashes/sec, and 33,554,432 / 67,108,864 trials sustained 8,520.68M / 8,517.10M hashes/sec, so ~8,500-8,520M hashes/sec is the throughput ceiling on this GPU/kernel, reached once per-dispatch overhead is amortized over a large enough batch. **Recommended settings for this hardware: `--gpu-block-size 512` with `--gpu-batch-size` set as large as the workload's memory budget allows** (ideally equal to the trial count for one-shot benchmarks; for long cycle searches, `--gpu-steps-per-dispatch` still bounds per-dispatch kernel *duration* for WDDM/TDR safety — raising `--gpu-batch-size` only adds more independent trials per dispatch, it does not lengthen any single trial's kernel time):
+
+```
+.\target\x86_64-pc-windows-msvc\release\hash-loop.exe --gpu-benchmark --bits 160 --trials 1048576 --gpu-batch-size 1048576 --gpu-benchmark-hashes 256 --gpu-block-size 512
+```
+
+The benchmark timing covers GPU kernel launch and synchronization for each batch. Seed upload, result download, allocation, and one-time NVRTC compilation are outside the timed interval. The best tuned GPU result (~8,520M hashes/sec) is about 10.3x the previously recorded 830.47M hashes/sec aggregate CPU result, but that comparison is directional: the CPU table measures a 32-bit Rayon workload, while this GPU benchmark measures full 160-bit chains.
+
+This throughput does not make full 160-bit cycle discovery practical. At 8.52 billion transitions per second, the expected $2^{80}$ work is still roughly 4.5 million years, before accounting for cycle-detection overhead. The GPU improves the number of independent trials that can be explored; it cannot parallelize the dependent transitions within one trial.
 
 Run the practical search in release mode:
 
@@ -91,6 +105,8 @@ Use the CUDA backend for sampled trials (not exhaustive search):
 ```
 cargo run --release -- --gpu --bits 32 --trials 100 --gpu-batch-size 65536
 ```
+
+That command tests 400 independent seeds by default. To run an exact GPU seed replay, pass `--gpu-restarts 1` together with `--trials 1` and `--seed`.
 
 For long cycle searches, keep the dispatch size bounded and raise the positional maximum as needed:
 
@@ -129,8 +145,8 @@ The table below keeps the shortest cycle found for each prefix width. Widths up 
 | 31 | `4FCF0E9000000000000000000000000000000000` | 4 | Exhaustive (exact) |
 | 32 | `423BC66E00000000000000000000000000000000` | 598 | Sampled (8,192 trials) |
 | 36 | `8A729482C0000000000000000000000000000000` | 3,001 | Sampled (1,024 trials) |
-| 40 | `80C9C161F0000000000000000000000000000000` | 78,056 | Sampled (32 trials) |
-| 44 | `952C63910B200000000000000000000000000000` | 113,754 | Sampled (16 trials) |
+| 40 | `E20CFFC358000000000000000000000000000000` | 11,824 | Sampled (4,096 GPU trials) |
+| 44 | `0004C38227700000000000000000000000000000` | 113,002 | Sampled (4,096 GPU trials) |
 | 48 | `F356AEE448D20000000000000000000000000000` | 18,935 | Sampled (4,096 GPU trials) |
 | 52 | `0AB09B1B0E669000000000000000000000000000` | 11,941,080 | Sampled (4 trials) |
 | 56 | `7431158B1305B500000000000000000000000000` | 7,213,347 | Sampled (8 trials) |
@@ -156,7 +172,7 @@ xychart-beta
     title "Lowest observed cycle length vs retained prefix bits (log2 scale)"
     x-axis [8, 12, 16, 20, 24, 26, 28, 30, 31, 32, 36, 40, 44, 48, 52, 56, 60, 64]
     y-axis "log2(cycle length)" 0 --> 32
-    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 11.55, 16.26, 16.80, 14.21, 23.51, 22.78, 24.76, 27.16]
+    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 11.55, 13.53, 16.79, 14.21, 23.51, 22.78, 24.76, 27.16]
     line [0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 11, 15, 18, 21, 24, 26, 26, 32]
 ```
 
