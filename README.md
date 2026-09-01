@@ -28,6 +28,22 @@ ARGS:
     <max>    Maximum search length, positive integer [default: 4294967296]
 ```
 
+## Performance
+
+Hash throughput is measured with a dedicated benchmark test (normally `#[ignore]`d): `cargo test --release -- --ignored --nocapture bench_hash_throughput`.
+
+| Configuration | Single-thread | Aggregate (20 cores) |
+| --- | ---: | ---: |
+| Baseline release build | 24.61M hashes/sec | 362.10M hashes/sec |
+| + LTO, `codegen-units = 1`, `panic = "abort"` (`[profile.release]`) | 29.85M hashes/sec | 519.49M hashes/sec |
+| + `-C target-cpu=native` (via `.cargo/config.toml`) | 32.37M hashes/sec | 830.47M hashes/sec |
+
+The `sha1` crate (0.11) already dispatches to hardware-accelerated SHA-NI instructions at runtime via `cpufeatures` CPU detection, with a software fallback, so no code changes were needed to use available hardware acceleration — it was already active. The remaining gains came purely from compiler configuration: link-time optimization, a single codegen unit (more cross-function inlining), disabling unwind tables, and targeting the exact build machine's instruction set. Together these more than doubled aggregate throughput (+129%) with no algorithmic changes.
+
+This does not change what's fundamentally reachable: expected work still scales as $2^{\text{bits}/2}$, so a ~30% single-thread speedup only extends the practical frontier by about $\log_2(1.3) \approx 0.4$ bits. It meaningfully speeds up searches in the 68-80 bit range (a given time budget goes further), but 140+ bit searches remain many orders of magnitude out of reach, and known SHA-1 collision/differential attacks (Wang et al., SHAttered, chosen-prefix) do not help either — they exploit control over two independently chosen colliding messages, which has no counterpart in this single-argument iterated-map search.
+
+`.cargo/config.toml` sets `target-cpu=native`, so builds are tuned for this machine's CPU and may not be portable to a different machine without adjusting or removing that file.
+
 Run the practical search in release mode:
 
 ```

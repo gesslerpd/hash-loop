@@ -366,7 +366,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_cycle, min_cycle_in_graph_progressive, Hash, HASH_SIZE};
+    use super::{
+        find_cycle, min_cycle_in_graph_progressive, next_index, sha1_hash, Hash, HASH_SIZE,
+    };
+    use rayon::prelude::*;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -415,5 +418,45 @@ mod tests {
     #[test]
     fn zero_max_does_not_search() {
         assert!(find_cycle([0; HASH_SIZE], 0, None, toy_hash).is_none());
+    }
+
+    // Throughput benchmark, not part of normal test runs: `cargo test --release -- --ignored
+    // --nocapture bench_hash_throughput`. Used to verify the impact of compiler/hardware
+    // acceleration changes on real hashes/sec rather than assuming.
+    #[test]
+    #[ignore]
+    fn bench_hash_throughput() {
+        let seed = [0u8; HASH_SIZE];
+
+        let single_thread_iters = 20_000_000u64;
+        let start = Instant::now();
+        let mut state = seed;
+        for _ in 0..single_thread_iters {
+            state = sha1_hash(&state, 32);
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "single-thread: {} hashes in {:.3}s = {:.2}M hashes/sec (sink: {:02X})",
+            single_thread_iters,
+            elapsed,
+            single_thread_iters as f64 / elapsed / 1e6,
+            state[0]
+        );
+
+        let multi_thread_iters = 200_000_000u64;
+        let start = Instant::now();
+        let sink: u8 = (0..multi_thread_iters)
+            .into_par_iter()
+            .map(|i| next_index(i as u32, 32) as u8)
+            .reduce(|| 0, |a, b| a ^ b);
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "multi-thread ({} cores): {} hashes in {:.3}s = {:.2}M hashes/sec (sink: {:02X})",
+            rayon::current_num_threads(),
+            multi_thread_iters,
+            elapsed,
+            multi_thread_iters as f64 / elapsed / 1e6,
+            sink
+        );
     }
 }
