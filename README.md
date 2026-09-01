@@ -88,6 +88,12 @@ The benchmark timing covers GPU kernel launch and synchronization for each batch
 
 This throughput does not make full 160-bit cycle discovery practical. At 8.52 billion transitions per second, the expected $2^{80}$ work is still roughly 4.5 million years, before accounting for cycle-detection overhead. The GPU improves the number of independent trials that can be explored; it cannot parallelize the dependent transitions within one trial.
 
+### CUDA kernel-level optimization
+
+`--gpu-benchmark` only exercises the `benchmark_hashes` kernel, which reads a seed once, loops entirely in registers, and writes one output word — `ptxas -v` confirms 0 bytes of register spill and disassembly shows the SHA-1 round function and rotate already collapse to single `LOP3.LUT` / funnel-shift (`SHF`) instructions per op, so there was no headroom left to hand-optimize there. The actual cycle-search kernel, `find_cycles_chunk`, is different: every one of its (up to `--gpu-steps-per-dispatch`) loop iterations was reading and writing the 17-word per-trial state directly through a global-memory pointer, since the compiler cannot assume the `seeds`/`states`/`results` kernel arguments don't alias each other. Disassembling the original kernel showed 60 `LDG` + 128 `STG` instructions versus only 5 `LDG` + 1 `STG` for the benchmark kernel of similar size.
+
+The fix: load the per-trial state into a local (register-resident) array once at kernel entry, run the entire dispatch loop against that local copy, and write it back to global memory once at the end, instead of touching global memory every iteration. Register usage for `find_cycles_chunk` rose from 40 to 64 per thread (still 0 spill), and disassembly confirmed `LDG`/`STG` dropped to 22/27 for the whole kernel (init + loop + epilogue combined, not per iteration). Measured on a controlled, deterministic workload (`--bits 80` guarantees no trial finds a repeat within the step budget, so both versions run the exact same amount of work with no early-exit variance): `--gpu --bits 80 --trials 65536 --gpu-batch-size 65536 --gpu-steps-per-dispatch 65536 --gpu-restarts 1 3276800` (50 dispatches of 65,536 trials × 65,536 steps) dropped from 45.0s to ~31.4-32.0s — about a **30% reduction in real cycle-search wall time**, with cycle-length results verified identical to the un-refactored kernel on known witnesses (16-bit length 1, 52-bit length 11,941,080, including the multi-dispatch case) before and after the change.
+
 Run the practical search in release mode:
 
 ```

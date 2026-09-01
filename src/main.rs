@@ -850,9 +850,17 @@ extern "C" __global__ void find_cycles_chunk(
         return;
     }
 
-    uint *state = states + trial * 17u;
+    uint *global_state = states + trial * 17u;
     uint *result = results + trial * 8u;
     const uint *seed = seeds + trial * 5u;
+
+    // Cache the per-trial state in registers for the whole dispatch instead of
+    // re-issuing a global load/store every loop iteration.
+    uint state[17];
+    #pragma unroll
+    for (uint index = 0u; index < 17u; index++) {
+        state[index] = global_state[index];
+    }
 
     if (state[16] == 4u) {
         state[0] = seed[0];
@@ -871,65 +879,68 @@ extern "C" __global__ void find_cycles_chunk(
         result[7] = 0u;
     }
 
-    if (state[16] >= 2u) {
-        return;
-    }
-
-    uint next[5];
-    for (uint iteration = 0u; iteration < steps_per_dispatch; iteration++) {
-        if (state[16] == 0u) {
-            if (same_state(state, state + 5u)) {
-                sha1_hash(state, state + 5u, bits);
-                state[10] = 0u;
-                state[11] = 0u;
-                state[12] = 1u;
-                state[13] = 0u;
-                state[16] = 1u;
-                continue;
-            }
-            if (!below_limit(state[14], state[15], max_low, max_high)) {
-                state[16] = 3u;
-                break;
-            }
-            if (state[10] == state[12] && state[11] == state[13]) {
-                copy_state(state + 5u, state);
-                double_counter(state[10], state[11]);
-                state[12] = 0u;
-                state[13] = 0u;
-            }
-            sha1_hash(state + 5u, next, bits);
-            copy_state(next, state + 5u);
-            increment_counter(state[12], state[13]);
-            increment_counter(state[14], state[15]);
-        } else {
-            if (same_state(state + 5u, state)) {
+    if (state[16] < 2u) {
+        uint next[5];
+        for (uint iteration = 0u; iteration < steps_per_dispatch; iteration++) {
+            if (state[16] == 0u) {
+                if (same_state(state, state + 5u)) {
+                    sha1_hash(state, state + 5u, bits);
+                    state[10] = 0u;
+                    state[11] = 0u;
+                    state[12] = 1u;
+                    state[13] = 0u;
+                    state[16] = 1u;
+                    continue;
+                }
+                if (!below_limit(state[14], state[15], max_low, max_high)) {
+                    state[16] = 3u;
+                    break;
+                }
+                if (state[10] == state[12] && state[11] == state[13]) {
+                    copy_state(state + 5u, state);
+                    double_counter(state[10], state[11]);
+                    state[12] = 0u;
+                    state[13] = 0u;
+                }
+                sha1_hash(state + 5u, next, bits);
+                copy_state(next, state + 5u);
+                increment_counter(state[12], state[13]);
+                increment_counter(state[14], state[15]);
+            } else {
+                if (same_state(state + 5u, state)) {
+                    if (!below_limit(state[12], state[13], cycle_limit_low, cycle_limit_high)) {
+                        state[16] = 3u;
+                        break;
+                    }
+                    result[0] = state[0];
+                    result[1] = state[1];
+                    result[2] = state[2];
+                    result[3] = state[3];
+                    result[4] = state[4];
+                    result[5] = state[12];
+                    result[6] = state[13];
+                    result[7] = 1u;
+                    state[16] = 2u;
+                    break;
+                }
                 if (!below_limit(state[12], state[13], cycle_limit_low, cycle_limit_high)) {
                     state[16] = 3u;
                     break;
                 }
-                result[0] = state[0];
-                result[1] = state[1];
-                result[2] = state[2];
-                result[3] = state[3];
-                result[4] = state[4];
-                result[5] = state[12];
-                result[6] = state[13];
-                result[7] = 1u;
-                state[16] = 2u;
-                break;
+                sha1_hash(state + 5u, next, bits);
+                copy_state(next, state + 5u);
+                increment_counter(state[12], state[13]);
             }
-            if (!below_limit(state[12], state[13], cycle_limit_low, cycle_limit_high)) {
-                state[16] = 3u;
-                break;
-            }
-            sha1_hash(state + 5u, next, bits);
-            copy_state(next, state + 5u);
-            increment_counter(state[12], state[13]);
+        }
+
+        if (state[16] == 3u) {
+            result[7] = 2u;
         }
     }
 
-    if (state[16] == 3u) {
-        result[7] = 2u;
+    #pragma unroll
+    for (uint index = 0u; index < 17u; index++) {
+        global_state[index] = state[index];
     }
 }
 
