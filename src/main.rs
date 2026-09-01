@@ -28,7 +28,7 @@ struct Opt {
     /// Enumerate the entire truncated state space and find the exact global minimum cycle (bits <= 31)
     #[structopt(long)]
     exhaustive: bool,
-    /// Stop exhaustive search after this many seconds and report the best cycle found so far
+    /// Stop the search after this many seconds and report the best cycle found so far
     #[structopt(long)]
     timeout_secs: Option<u64>,
     /// Switch on verbosity
@@ -206,7 +206,7 @@ fn exhaustive_min_cycle<F: FnMut(Hash, u64)>(
     (best_hash, states_processed, n as u64, completed)
 }
 
-fn find_cycle<F>(seed: Hash, max: u128, hash: F) -> Option<(Hash, u128)>
+fn find_cycle<F>(seed: Hash, max: u128, deadline: Option<Instant>, hash: F) -> Option<(Hash, u128)>
 where
     F: Fn(&Hash) -> Hash,
 {
@@ -219,8 +219,14 @@ where
     let mut power = 1u128;
     let mut length = 1u128;
     let mut steps = 1u128;
+    const CHECK_MASK: u128 = (1 << 20) - 1;
 
     while tortoise != hare && steps < max {
+        if let Some(deadline) = deadline {
+            if steps & CHECK_MASK == 0 && Instant::now() >= deadline {
+                return None;
+            }
+        }
         if power == length {
             tortoise = hare;
             power = power.saturating_mul(2);
@@ -311,6 +317,10 @@ fn main() {
         return;
     }
 
+    let sample_deadline = opt
+        .timeout_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs));
+
     let result = if let Some(seed_text) = opt.seed.as_deref() {
         let seed = match parse_hash(seed_text) {
             Ok(seed) => seed,
@@ -319,7 +329,9 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        find_cycle(seed, opt.max, |input| sha1_hash(input, opt.bits))
+        find_cycle(seed, opt.max, sample_deadline, |input| {
+            sha1_hash(input, opt.bits)
+        })
     } else {
         (0..opt.trials)
             .into_par_iter()
@@ -330,7 +342,9 @@ fn main() {
                     println!("{} random hash seed", fmt_hash(&seed));
                 }
 
-                find_cycle(seed, opt.max, |input| sha1_hash(input, opt.bits))
+                find_cycle(seed, opt.max, sample_deadline, |input| {
+                    sha1_hash(input, opt.bits)
+                })
             })
             .filter_map(|cycle| cycle)
             .min_by_key(|(_, cycle_length)| *cycle_length)
@@ -392,7 +406,7 @@ mod tests {
     fn finds_a_cycle() {
         let seed = [0; HASH_SIZE];
         let (cycle_hash, cycle_length) =
-            find_cycle(seed, 10, toy_hash).expect("cycle should be found");
+            find_cycle(seed, 10, None, toy_hash).expect("cycle should be found");
 
         assert!(cycle_hash[0] == 2 || cycle_hash[0] == 3);
         assert_eq!(cycle_length, 2);
@@ -400,6 +414,6 @@ mod tests {
 
     #[test]
     fn zero_max_does_not_search() {
-        assert!(find_cycle([0; HASH_SIZE], 0, toy_hash).is_none());
+        assert!(find_cycle([0; HASH_SIZE], 0, None, toy_hash).is_none());
     }
 }
