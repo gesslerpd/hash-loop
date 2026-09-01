@@ -47,6 +47,9 @@ struct Opt {
     /// CUDA threads per block; benchmark several values for best throughput
     #[structopt(long, default_value = "256")]
     gpu_block_size: u32,
+    /// SHA-1 transitions performed per GPU kernel dispatch and trial
+    #[structopt(long, default_value = "65536")]
+    gpu_steps_per_dispatch: u32,
     /// Switch on verbosity
     #[structopt(short)]
     verbose: bool,
@@ -752,7 +755,7 @@ __device__ __forceinline__ void sha1_hash(const uint input[5], uint output[5], u
     schedule[2] = input[2];
     schedule[3] = input[3];
     schedule[4] = input[4];
-    schedule[5] = 0u;
+    schedule[5] = 0x80000000u;
     schedule[6] = 0u;
     schedule[7] = 0u;
     schedule[8] = 0u;
@@ -824,79 +827,98 @@ __device__ __forceinline__ void sha1_hash(const uint input[5], uint output[5], u
     }
 }
 
-extern "C" __global__ void find_cycles(
+extern "C" __global__ void find_cycles_chunk(
     const uint *seeds,
+    uint *states,
     uint *results,
     uint bits,
     uint max_low,
     uint max_high,
-    uint trial_count
+    uint trial_count,
+    uint steps_per_dispatch
 ) {
     uint trial = blockIdx.x * blockDim.x + threadIdx.x;
     if (trial >= trial_count) {
         return;
     }
 
-    uint tortoise[5];
-    uint hare[5];
-    uint next[5];
-    const uint *seed = seeds + trial * 5u;
-    tortoise[0] = seed[0];
-    tortoise[1] = seed[1];
-    tortoise[2] = seed[2];
-    tortoise[3] = seed[3];
-    tortoise[4] = seed[4];
-    sha1_hash(tortoise, hare, bits);
-
-    uint power_low = 1u;
-    uint power_high = 0u;
-    uint length_low = 1u;
-    uint length_high = 0u;
-    uint steps_low = 1u;
-    uint steps_high = 0u;
-    while (!same_state(tortoise, hare) && below_limit(steps_low, steps_high, max_low, max_high)) {
-        if (power_low == length_low && power_high == length_high) {
-            copy_state(hare, tortoise);
-            double_counter(power_low, power_high);
-            length_low = 0u;
-            length_high = 0u;
-        }
-        sha1_hash(hare, next, bits);
-        copy_state(next, hare);
-        increment_counter(length_low, length_high);
-        increment_counter(steps_low, steps_high);
-    }
-
+    uint *state = states + trial * 17u;
     uint *result = results + trial * 8u;
-    result[7] = 0u;
-    if (!same_state(tortoise, hare)) {
+    const uint *seed = seeds + trial * 5u;
+
+    if (state[16] == 4u) {
+        state[0] = seed[0];
+        state[1] = seed[1];
+        state[2] = seed[2];
+        state[3] = seed[3];
+        state[4] = seed[4];
+        sha1_hash(state, state + 5u, bits);
+        state[10] = 1u;
+        state[11] = 0u;
+        state[12] = 1u;
+        state[13] = 0u;
+        state[14] = 1u;
+        state[15] = 0u;
+        state[16] = 0u;
+        result[7] = 0u;
+    }
+
+    if (state[16] >= 2u) {
         return;
     }
 
-    uint cycle_hash[5];
-    uint cursor[5];
-    copy_state(tortoise, cycle_hash);
-    sha1_hash(cycle_hash, cursor, bits);
-    uint cycle_length_low = 1u;
-    uint cycle_length_high = 0u;
-    while (!same_state(cursor, cycle_hash)
-        && below_limit(cycle_length_low, cycle_length_high, max_low, max_high)) {
-        sha1_hash(cursor, next, bits);
-        copy_state(next, cursor);
-        increment_counter(cycle_length_low, cycle_length_high);
-    }
-    if (!same_state(cursor, cycle_hash)) {
-        return;
+    uint next[5];
+    for (uint iteration = 0u; iteration < steps_per_dispatch; iteration++) {
+        if (state[16] == 0u) {
+            if (same_state(state, state + 5u)) {
+                sha1_hash(state, state + 5u, bits);
+                state[10] = 0u;
+                state[11] = 0u;
+                state[12] = 1u;
+                state[13] = 0u;
+                state[16] = 1u;
+                continue;
+            }
+            if (!below_limit(state[14], state[15], max_low, max_high)) {
+                state[16] = 3u;
+                break;
+            }
+            if (state[10] == state[12] && state[11] == state[13]) {
+                copy_state(state + 5u, state);
+                double_counter(state[10], state[11]);
+                state[12] = 0u;
+                state[13] = 0u;
+            }
+            sha1_hash(state + 5u, next, bits);
+            copy_state(next, state + 5u);
+            increment_counter(state[12], state[13]);
+            increment_counter(state[14], state[15]);
+        } else {
+            if (same_state(state + 5u, state)) {
+                result[0] = state[0];
+                result[1] = state[1];
+                result[2] = state[2];
+                result[3] = state[3];
+                result[4] = state[4];
+                result[5] = state[12];
+                result[6] = state[13];
+                result[7] = 1u;
+                state[16] = 2u;
+                break;
+            }
+            if (!below_limit(state[12], state[13], max_low, max_high)) {
+                state[16] = 3u;
+                break;
+            }
+            sha1_hash(state + 5u, next, bits);
+            copy_state(next, state + 5u);
+            increment_counter(state[12], state[13]);
+        }
     }
 
-    result[0] = cycle_hash[0];
-    result[1] = cycle_hash[1];
-    result[2] = cycle_hash[2];
-    result[3] = cycle_hash[3];
-    result[4] = cycle_hash[4];
-    result[5] = cycle_length_low;
-    result[6] = cycle_length_high;
-    result[7] = 1u;
+    if (state[16] == 3u) {
+        result[7] = 2u;
+    }
 }
 
 extern "C" __global__ void benchmark_hashes(
@@ -982,6 +1004,7 @@ fn cuda_find_cycles(
     max: u128,
     batch_size: usize,
     block_size: u32,
+    steps_per_dispatch: u32,
     verbose: bool,
     deadline: Option<Instant>,
 ) -> Result<Option<(Hash, u128)>, String> {
@@ -995,7 +1018,7 @@ fn cuda_find_cycles(
     }
     let (context, module) = cuda_device()?;
     let function = module
-        .load_function("find_cycles")
+        .load_function("find_cycles_chunk")
         .map_err(|error| format!("could not load CUDA cycle kernel: {}", error))?;
     let stream = context.default_stream();
     if verbose {
@@ -1014,39 +1037,66 @@ fn cuda_find_cycles(
         let device_seeds = stream
             .clone_htod(&seed_words)
             .map_err(|error| format!("could not upload CUDA seeds: {}", error))?;
+        let mut state_words = vec![0u32; batch.len() * 17];
+        for trial in 0..batch.len() {
+            let state_offset = trial * 17;
+            let seed_offset = trial * 5;
+            state_words[state_offset..state_offset + 5]
+                .copy_from_slice(&seed_words[seed_offset..seed_offset + 5]);
+            state_words[state_offset + 16] = 4;
+        }
+        let mut device_states = stream
+            .clone_htod(&state_words)
+            .map_err(|error| format!("could not upload CUDA cycle state: {}", error))?;
         let mut device_results = stream
             .alloc_zeros::<u32>(batch.len() * 8)
             .map_err(|error| format!("could not allocate CUDA results: {}", error))?;
-        let config = cuda_launch_config(batch.len(), block_size);
-        unsafe {
+        loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+            let config = cuda_launch_config(batch.len(), block_size);
+            unsafe {
+                stream
+                    .launch_builder(&function)
+                    .arg(&device_seeds)
+                    .arg(&mut device_states)
+                    .arg(&mut device_results)
+                    .arg(&u32::from(bits))
+                    .arg(&(max as u32))
+                    .arg(&((max >> 32) as u32))
+                    .arg(&(batch.len() as u32))
+                    .arg(&steps_per_dispatch)
+                    .launch(config)
+                    .map_err(|error| format!("CUDA cycle kernel failed: {}", error))?;
+            }
             stream
-                .launch_builder(&function)
-                .arg(&device_seeds)
-                .arg(&mut device_results)
-                .arg(&u32::from(bits))
-                .arg(&(max as u32))
-                .arg(&((max >> 32) as u32))
-                .arg(&(batch.len() as u32))
-                .launch(config)
-                .map_err(|error| format!("CUDA cycle kernel failed: {}", error))?;
-        }
-        stream
-            .synchronize()
-            .map_err(|error| format!("CUDA synchronization failed: {}", error))?;
-        let results = stream
-            .clone_dtoh(&device_results)
-            .map_err(|error| format!("could not download CUDA results: {}", error))?;
-        for result in results.chunks_exact(8) {
-            if result[7] == 0 {
-                continue;
+                .synchronize()
+                .map_err(|error| format!("CUDA synchronization failed: {}", error))?;
+            let results = stream
+                .clone_dtoh(&device_results)
+                .map_err(|error| format!("could not download CUDA results: {}", error))?;
+            let mut completed = 0;
+            for result in results.chunks_exact(8) {
+                if result[7] == 0 {
+                    continue;
+                }
+                completed += 1;
+                if result[7] != 1 {
+                    continue;
+                }
+                let mut cycle_hash = [0u8; HASH_SIZE];
+                for index in 0..5 {
+                    cycle_hash[index * 4..index * 4 + 4]
+                        .copy_from_slice(&result[index].to_be_bytes());
+                }
+                let cycle_length = u128::from(result[5]) | (u128::from(result[6]) << 32);
+                if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
+                    best = Some((cycle_hash, cycle_length));
+                }
             }
-            let mut cycle_hash = [0u8; HASH_SIZE];
-            for index in 0..5 {
-                cycle_hash[index * 4..index * 4 + 4].copy_from_slice(&result[index].to_be_bytes());
-            }
-            let cycle_length = u128::from(result[5]) | (u128::from(result[6]) << 32);
-            if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
-                best = Some((cycle_hash, cycle_length));
+            if completed == batch.len() {
+                break;
             }
         }
     }
@@ -1169,6 +1219,10 @@ fn main() {
     }
     if opt.gpu_batch_size == 0 {
         eprintln!("gpu-batch-size must be greater than zero");
+        std::process::exit(2);
+    }
+    if opt.gpu_steps_per_dispatch == 0 {
+        eprintln!("gpu-steps-per-dispatch must be greater than zero");
         std::process::exit(2);
     }
     if opt.gpu && opt.exhaustive {
@@ -1313,6 +1367,7 @@ fn main() {
             opt.max,
             gpu_batch_size,
             opt.gpu_block_size,
+            opt.gpu_steps_per_dispatch,
             opt.verbose,
             sample_deadline,
         ) {
@@ -1368,10 +1423,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cycle, min_cycle_in_graph_progressive, next_index, sha1_hash, Hash, HASH_SIZE,
+        find_cycle, min_cycle_in_graph_progressive, next_index, sha1_hash, Hash, Opt, HASH_SIZE,
     };
     use rayon::prelude::*;
     use std::time::{Duration, Instant};
+    use structopt::StructOpt;
+
+    #[test]
+    fn default_search_limit_reaches_ten_billion_cycle_lengths() {
+        let opt = Opt::from_iter_safe(["hash-loop"]).expect("default arguments should parse");
+        assert!(opt.max >= 10_300_411_851);
+        assert_eq!(opt.gpu_steps_per_dispatch, 65_536);
+    }
 
     #[test]
     fn min_cycle_in_graph_finds_global_minimum() {

@@ -28,6 +28,7 @@ OPTIONS:
     --gpu-benchmark     Run a fixed-transition GPU throughput benchmark instead of cycle search
     --gpu-benchmark-hashes <n>  SHA-1 transitions per benchmark trial [default: 256]
     --gpu-block-size <n>  CUDA threads per block [default: 256]
+    --gpu-steps-per-dispatch <n>  SHA-1 transitions per GPU kernel dispatch and trial [default: 65536]
 
 ARGS:
     <max>    Maximum search length, positive integer [default: 34359738368]
@@ -51,7 +52,7 @@ This does not change what's fundamentally reachable: expected work still scales 
 
 ### CUDA GPU performance
 
-The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
+The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. Cycle-search state is retained between bounded kernel dispatches, so a trial can reach long cycle lengths without requiring one watchdog-prone kernel. `--gpu-steps-per-dispatch` controls that chunk size; 65,536 is a practical default for Windows WDDM. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
 
 Run the fixed-transition benchmark on Windows after adding the CUDA 13.3 DLL directories to `PATH`:
 
@@ -65,7 +66,7 @@ Each run processed 1,048,576 independent trials, with 256 full 160-bit SHA-1 tra
 | CUDA block size | Elapsed | Throughput |
 | ---: | ---: | ---: |
 | 128 | 0.036 s | 7,391.64M hashes/sec |
-| 256 | 0.036 s | **7,554.33M hashes/sec** |
+| 256 | 0.036 s | **7,513.62M hashes/sec** |
 | 512 | 0.036 s | 7,501.17M hashes/sec |
 
 The benchmark timing covers GPU kernel launch and synchronization for each batch. Seed upload, result download, allocation, and one-time NVRTC compilation are outside the timed interval. The best GPU result is about 9.1x the previously recorded 830.47M hashes/sec aggregate CPU result, but that comparison is directional: the CPU table measures a 32-bit Rayon workload, while this GPU benchmark measures full 160-bit chains.
@@ -89,6 +90,14 @@ Use the CUDA backend for sampled trials (not exhaustive search):
 ```
 cargo run --release -- --gpu --bits 32 --trials 100 --gpu-batch-size 65536
 ```
+
+For long cycle searches, keep the dispatch size bounded and raise the positional maximum as needed:
+
+```
+cargo run --release -- --gpu --bits 76 --trials 256 --gpu-batch-size 256 --gpu-steps-per-dispatch 65536 34359738368
+```
+
+At 76 bits, a random walk is expected to require roughly $2^{38}$ transitions before its first repeat, so even a fast GPU does not make broad 76-100-bit witness searches quick. A bounded run can still produce a useful witness, but a no-result run is only a sample within its time and transition limits.
 
 The default maximum search length is 34,359,738,368 ($2^{35}$), which gives Brent's cycle detector enough headroom to reach and confirm cycle lengths around the current 72-bit witness (10,300,411,851). The same limit can be supplied explicitly as the positional `max` argument:
 
