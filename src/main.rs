@@ -1058,7 +1058,7 @@ fn cuda_find_cycles(
         );
     }
     let max = max as u64;
-    let cycle_limit = max_cycle_length.unwrap_or(u128::from(u64::MAX)) as u64;
+    let mut cycle_limit = max_cycle_length.unwrap_or(u128::from(u64::MAX)) as u64;
     let mut best: Option<(Hash, u128)> = None;
     for batch in seeds.chunks(batch_size) {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1127,6 +1127,7 @@ fn cuda_find_cycles(
                 if best.is_none_or(|(_, best_length)| cycle_length < best_length) {
                     on_new_best(cycle_hash, cycle_length);
                     best = Some((cycle_hash, cycle_length));
+                    cycle_limit = cycle_length as u64;
                 }
             }
             if completed == batch.len() {

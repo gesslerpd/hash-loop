@@ -54,7 +54,7 @@ This does not change what's fundamentally reachable: expected work still scales 
 
 ### CUDA GPU performance
 
-The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. Cycle-search state is retained between bounded kernel dispatches, so a trial can reach long cycle lengths without requiring one watchdog-prone kernel. `--gpu-steps-per-dispatch` controls that chunk size; 65,536 is a practical default for Windows WDDM. GPU sampled searches use four fresh random seed batches by default; increase or reduce this with `--gpu-restarts`. Each improving witness is printed and flushed immediately after its dispatch is read back, so witnesses found before a timeout or manual stop remain visible; the final line still reports the best result from the complete run. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
+The CUDA backend runs one independent trial per GPU thread and submits trials in batches. The state transitions within an individual trial remain serial because each SHA-1 input depends on the previous output. Cycle-search state is retained between bounded kernel dispatches, so a trial can reach long cycle lengths without requiring one watchdog-prone kernel. `--gpu-steps-per-dispatch` controls that chunk size; 65,536 is a practical default for Windows WDDM. GPU sampled searches use four fresh random seed batches by default; increase or reduce this with `--gpu-restarts`. The cycle-length cutoff adapts downward whenever a better witness is found, while the positional discovery maximum remains unchanged so long-tail seeds are still searched. Each improving witness is printed and flushed immediately after its dispatch is read back, so witnesses found before a timeout or manual stop remain visible; the final line still reports the best result from the complete run. CUDA 13.3 and an NVIDIA RTX 3070 (8 GiB, compute capability 8.6) were used for the measurements below.
 
 Run the fixed-transition benchmark on Windows after adding the CUDA 13.3 DLL directories to `PATH`:
 
@@ -154,7 +154,7 @@ The table below keeps the shortest cycle found for each prefix width. Widths up 
 | 40 | `634A125FBB000000000000000000000000000000` | 265 | Sampled (32,768 GPU trials) |
 | 44 | `DA7602062FA00000000000000000000000000000` | 77,097 | Sampled (16,384 GPU trials) |
 | 48 | `F356AEE448D20000000000000000000000000000` | 18,935 | Sampled (4,096 GPU trials) |
-| 52 | `0AB09B1B0E669000000000000000000000000000` | 11,941,080 | Sampled (4 trials) |
+| 52 | `3400503E44DF5000000000000000000000000000` | 2,450,420 | Sampled (2,048 GPU trials) |
 | 56 | `7431158B1305B500000000000000000000000000` | 7,213,347 | Sampled (8 trials) |
 | 60 | `8A0273C0DEDDF0F0000000000000000000000000` | 28,438,441 | Sampled (16 trials) |
 | 64 | `BE5E52F3CFD5F6E4000000000000000000000000` | 149,463,600 | Sampled (1 trial) |
@@ -178,7 +178,7 @@ xychart-beta
     title "Lowest observed cycle length vs retained prefix bits (log2 scale)"
     x-axis [8, 12, 16, 20, 24, 26, 28, 30, 31, 32, 36, 40, 44, 48, 52, 56, 60, 64]
     y-axis "log2(cycle length)" 0 --> 32
-    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 9.85, 8.05, 16.23, 14.21, 23.51, 22.78, 24.76, 27.16]
+    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 9.85, 8.05, 16.23, 14.21, 21.22, 22.78, 24.76, 27.16]
     line [0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 11, 15, 18, 21, 24, 26, 26, 32]
 ```
 
