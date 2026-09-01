@@ -81,6 +81,7 @@ The table below keeps the shortest cycle found for each prefix width. Widths up 
 | 60 | `8A0273C0DEDDF0F0000000000000000000000000` | 28,438,441 | Sampled (16 trials) |
 | 64 | `BE5E52F3CFD5F6E4000000000000000000000000` | 149,463,600 | Sampled (1 trial) |
 | 68 | `867930C10D01F41A900000000000000000000000` | 1,502,305,172 | Sampled (40 trials) |
+| 72 | `0BD98290330A1AEB8F0000000000000000000000` | 10,300,411,851 | Sampled (40 trials) |
 
 ## Why Exhaustive Search Finds Shorter Cycles
 
