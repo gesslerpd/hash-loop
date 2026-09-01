@@ -17,6 +17,9 @@ struct Opt {
     /// Maximum search length, positive integer
     #[structopt(default_value = "34359738368")]
     max: u128,
+    /// Ignore cycles whose length is not less than this value
+    #[structopt(long)]
+    max_cycle_length: Option<u128>,
     /// Number of leading SHA-1 bits retained in each state
     #[structopt(long, default_value = "32")]
     bits: u8,
@@ -834,6 +837,8 @@ extern "C" __global__ void find_cycles_chunk(
     uint bits,
     uint max_low,
     uint max_high,
+    uint cycle_limit_low,
+    uint cycle_limit_high,
     uint trial_count,
     uint steps_per_dispatch
 ) {
@@ -895,6 +900,10 @@ extern "C" __global__ void find_cycles_chunk(
             increment_counter(state[14], state[15]);
         } else {
             if (same_state(state + 5u, state)) {
+                if (!below_limit(state[12], state[13], cycle_limit_low, cycle_limit_high)) {
+                    state[16] = 3u;
+                    break;
+                }
                 result[0] = state[0];
                 result[1] = state[1];
                 result[2] = state[2];
@@ -906,7 +915,7 @@ extern "C" __global__ void find_cycles_chunk(
                 state[16] = 2u;
                 break;
             }
-            if (!below_limit(state[12], state[13], max_low, max_high)) {
+            if (!below_limit(state[12], state[13], cycle_limit_low, cycle_limit_high)) {
                 state[16] = 3u;
                 break;
             }
@@ -1002,6 +1011,7 @@ fn cuda_find_cycles(
     seeds: &[Hash],
     bits: u8,
     max: u128,
+    max_cycle_length: Option<u128>,
     batch_size: usize,
     block_size: u32,
     steps_per_dispatch: u32,
@@ -1012,6 +1022,9 @@ fn cuda_find_cycles(
 
     if max > u128::from(u64::MAX) {
         return Err("CUDA search supports maximum lengths up to 2^64 - 1".to_string());
+    }
+    if max_cycle_length.is_some_and(|length| length > u128::from(u64::MAX)) {
+        return Err("CUDA cycle-length cutoff supports values up to 2^64 - 1".to_string());
     }
     if seeds.len() > u32::MAX as usize || batch_size > u32::MAX as usize {
         return Err("CUDA search supports at most 2^32 - 1 trials per dispatch".to_string());
@@ -1028,6 +1041,7 @@ fn cuda_find_cycles(
         );
     }
     let max = max as u64;
+    let cycle_limit = max_cycle_length.unwrap_or(u128::from(u64::MAX)) as u64;
     let mut best: Option<(Hash, u128)> = None;
     for batch in seeds.chunks(batch_size) {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1065,6 +1079,8 @@ fn cuda_find_cycles(
                     .arg(&u32::from(bits))
                     .arg(&(max as u32))
                     .arg(&((max >> 32) as u32))
+                    .arg(&(cycle_limit as u32))
+                    .arg(&((cycle_limit >> 32) as u32))
                     .arg(&(batch.len() as u32))
                     .arg(&steps_per_dispatch)
                     .launch(config)
@@ -1195,6 +1211,10 @@ fn main() {
     let opt = Opt::from_args();
     if opt.max == 0 {
         eprintln!("max must be greater than zero");
+        std::process::exit(2);
+    }
+    if opt.max_cycle_length == Some(0) {
+        eprintln!("max-cycle-length must be greater than zero");
         std::process::exit(2);
     }
     if opt.trials == 0 {
@@ -1365,6 +1385,7 @@ fn main() {
             &seeds,
             opt.bits,
             opt.max,
+            opt.max_cycle_length,
             gpu_batch_size,
             opt.gpu_block_size,
             opt.gpu_steps_per_dispatch,
@@ -1388,6 +1409,10 @@ fn main() {
         find_cycle(seed, opt.max, sample_deadline, |input| {
             sha1_hash(input, opt.bits)
         })
+        .filter(|(_, cycle_length)| {
+            opt.max_cycle_length
+                .is_none_or(|limit| *cycle_length < limit)
+        })
     } else {
         (0..opt.trials)
             .into_par_iter()
@@ -1400,6 +1425,10 @@ fn main() {
 
                 find_cycle(seed, opt.max, sample_deadline, |input| {
                     sha1_hash(input, opt.bits)
+                })
+                .filter(|(_, cycle_length)| {
+                    opt.max_cycle_length
+                        .is_none_or(|limit| *cycle_length < limit)
                 })
             })
             .filter_map(|cycle| cycle)

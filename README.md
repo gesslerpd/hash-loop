@@ -19,6 +19,7 @@ FLAGS:
     -v               Switch on verbosity
 
 OPTIONS:
+    --max-cycle-length <n>  Ignore cycles whose length is not less than this value
     --bits <bits>      Number of leading SHA-1 bits retained in each state [default: 32]
     --trials <trials>  Number of independent seeds to test [default: 1]
     --exhaustive        Enumerate the entire truncated state space for the exact global minimum cycle (bits <= 31)
@@ -97,6 +98,12 @@ For long cycle searches, keep the dispatch size bounded and raise the positional
 cargo run --release -- --gpu --bits 76 --trials 256 --gpu-batch-size 256 --gpu-steps-per-dispatch 65536 34359738368
 ```
 
+To search for an improvement over an existing record, use `--max-cycle-length` as a strict cutoff. Brent's discovery limit remains the positional `max`, so long-tail seeds are not discarded prematurely:
+
+```
+cargo run --release -- --gpu --bits 52 --trials 256 --gpu-batch-size 256 --max-cycle-length 11941080 34359738368
+```
+
 At 76 bits, a random walk is expected to require roughly $2^{38}$ transitions before its first repeat, so even a fast GPU does not make broad 76-100-bit witness searches quick. A bounded run can still produce a useful witness, but a no-result run is only a sample within its time and transition limits.
 
 The default maximum search length is 34,359,738,368 ($2^{35}$), which gives Brent's cycle detector enough headroom to reach and confirm cycle lengths around the current 72-bit witness (10,300,411,851). The same limit can be supplied explicitly as the positional `max` argument:
@@ -124,7 +131,7 @@ The table below keeps the shortest cycle found for each prefix width. Widths up 
 | 36 | `8A729482C0000000000000000000000000000000` | 3,001 | Sampled (1,024 trials) |
 | 40 | `80C9C161F0000000000000000000000000000000` | 78,056 | Sampled (32 trials) |
 | 44 | `952C63910B200000000000000000000000000000` | 113,754 | Sampled (16 trials) |
-| 48 | `AE3CFD6E5B7E0000000000000000000000000000` | 9,288,468 | Sampled (8 trials) |
+| 48 | `F356AEE448D20000000000000000000000000000` | 18,935 | Sampled (4,096 GPU trials) |
 | 52 | `0AB09B1B0E669000000000000000000000000000` | 11,941,080 | Sampled (4 trials) |
 | 56 | `7431158B1305B500000000000000000000000000` | 7,213,347 | Sampled (8 trials) |
 | 60 | `8A0273C0DEDDF0F0000000000000000000000000` | 28,438,441 | Sampled (16 trials) |
@@ -149,7 +156,7 @@ xychart-beta
     title "Lowest observed cycle length vs retained prefix bits (log2 scale)"
     x-axis [8, 12, 16, 20, 24, 26, 28, 30, 31, 32, 36, 40, 44, 48, 52, 56, 60, 64]
     y-axis "log2(cycle length)" 0 --> 32
-    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 11.55, 16.26, 16.80, 23.15, 23.51, 22.78, 24.76, 27.16]
+    line [1.00, 2.32, 0.00, 1.00, 0.00, 1.00, 1.00, 2.81, 2.00, 9.22, 11.55, 16.26, 16.80, 14.21, 23.51, 22.78, 24.76, 27.16]
     line [0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 11, 15, 18, 21, 24, 26, 26, 32]
 ```
 
