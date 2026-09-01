@@ -32,7 +32,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateRange(48, 160)]
+    [ValidateRange(32, 160)]
     [int]$Bits,
 
     [int]$TimeoutSecs,
@@ -90,13 +90,19 @@ if (-not (Test-Path $exe)) {
 }
 
 $argList = @(
+    # for seed replay/verification (always use CPU for this)
+    # "--seed", "BE5E52F3CFD5F6E4000000000000000000000000",
+    # "--trials", "1",
+    # "--gpu-restarts", "1",
+
     "--gpu",
-    "--bits", $Bits,
     "--trials", $trials,
+    "--gpu-restarts", $restarts,
+
+    "--bits", $Bits,
     "--gpu-batch-size", $batchSize,
     "--gpu-block-size", $blockSize,
     "--gpu-steps-per-dispatch", $stepsPerDispatch,
-    "--gpu-restarts", $restarts,
     "--timeout-secs", $effectiveTimeout
 )
 if ($MaxCycleLength) {
