@@ -183,3 +183,20 @@ xychart-beta
 ```
 
 The reference line sits at or below the observed minimum for nearly every width. It sits slightly above the data at 44-60 bits (sampling noise from very few trials) and meets it exactly at 64 bits, where the single completed random walk used for the chart is still the shortest of the two successful 64-bit searches on record: a follow-up 8-trial search completed with a much longer cycle (length 1,525,552,541), reinforcing that shorter completed walks are somewhat favored just by having finished within the practical execution window. A 68-bit probe has not yet completed within that window.
+
+## Reference
+
+https://crypto.stackexchange.com/questions/19493/is-there-a-string-thats-hash-is-equal-to-itself
+https://www.reddit.com/r/computerscience/comments/p99xqz/what_happens_if_you_apply_a_hash_continually_on/
+https://crypto.stackexchange.com/questions/70474/smallest-guaranteed-hash-collision-cycle-length
+https://crypto.stackexchange.com/questions/24623/cycles-in-sha-256
+
+For a uniform random function with \(N\) possible output values, the average cycle length is on the order of the square root of \(N\), specifically \(\sqrt{\frac{\pi N}{8}}\).
+
+### Key Statistics for Random Mappings
+
+When you repeatedly apply a uniform random function to an input (creating a sequence like \(x, f(x), f(f(x)), \dots\)), the trajectory eventually falls into a repeating loop (a cycle) preceded by a non-repeating path (a tail).Average Cycle Length: \(\approx 1.253 \times \sqrt{N}\) (or \(\sqrt{\frac{\pi N}{8}}\))Average Tail Length: \(\approx 1.253 \times \sqrt{N}\) (the number of steps before hitting a previously seen value)Total Path Length (Tail + Cycle): \(\approx 1.253 \times \sqrt{2N}\) (or \(\sqrt{\frac{\pi N}{2}}\)), which is the expected number of evaluations required to find a collision using algorithms like Pollard's rho.
+
+#### Practical Application
+
+If a cryptographic hash function has a \(b\)-bit output, then \(N = 2^b\).The expected cycle and collision lengths scale as \(\sqrt{2^b} = 2^{b/2}\).For example, a 256-bit hash function (\(N = 2^{256}\)) has an expected cycle length on the order of \(2^{128}\).Would you like to explore how this applies to collision-finding algorithms like Pollard's rho, or do you need help with a specific bit-length calculation?Cryptography Stack ExchangeCycles in SHA-256Mar 25, 2015 — SHA-256 is designed to behave as a random function. Under this assumption, it is expected that for most 256-bit values, there is n...RedditWhat happens if you apply a hash continually on itself? Will it ...Aug 22, 2021 — seedubjay_ • 5y ago If the hash function forms a permutation cipher, the cycle will have on average (N+1)/2 hashes. If the hash fu...Semantic Scholar[PDF] Random Mapping Statistics - Semantic ScholarRandom Mappings with Restricted Preimages · A. MacFieD. Panario. Computer Science, Mathematics. LATINCRYPT. 2012. TLDR. An element...

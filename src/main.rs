@@ -694,6 +694,10 @@ fn cuda_find_cycles(
                     on_new_best(cycle_hash, cycle_length);
                     best = Some((cycle_hash, cycle_length));
                     cycle_limit = cycle_length as u64;
+                } else if verbose
+                    && best.is_some_and(|(_, best_length)| cycle_length == best_length)
+                {
+                    on_new_best(cycle_hash, cycle_length);
                 }
             }
             if completed == batch.len() {
@@ -967,9 +971,9 @@ fn main() {
                 .map(|_| {
                     let mut rng = rand::thread_rng();
                     let seed = truncate_hash(rng.gen(), opt.bits);
-                    if opt.verbose {
-                        println!("{} random hash seed", fmt_hash(&seed));
-                    }
+                    // if opt.verbose {
+                    //     println!("{} random hash seed", fmt_hash(&seed));
+                    // }
                     seed
                 })
                 .collect()

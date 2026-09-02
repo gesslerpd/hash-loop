@@ -90,8 +90,9 @@ if (-not (Test-Path $exe)) {
 }
 
 $argList = @(
+    "-v",
     # for seed replay/verification (always use CPU for this)
-    # "--seed", "1DAF2CA400000000000000000000000000000000",
+    # "--seed", "0000000000000000000000000000000000000000",
     # "--trials", "1",
     # "--gpu-restarts", "1",
 
