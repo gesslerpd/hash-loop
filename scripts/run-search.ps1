@@ -32,7 +32,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateRange(32, 160)]
+    [ValidateRange(16, 160)]
     [int]$Bits,
 
     [int]$TimeoutSecs,
@@ -48,13 +48,13 @@ $ErrorActionPreference = "Stop"
 # budget but fewer restarts, since each restart re-runs the full budget from scratch and
 # more parallel trials (not more restarts) is what actually helps find shorter cycles.
 $tiers = @(
-    @{ Max = 56;  TimeoutSecs = 60;   Restarts = 8 }
-    @{ Max = 64;  TimeoutSecs = 180;  Restarts = 6 }
-    @{ Max = 72;  TimeoutSecs = 600;  Restarts = 4 }
-    @{ Max = 80;  TimeoutSecs = 1200; Restarts = 2 }
-    @{ Max = 92;  TimeoutSecs = 1800; Restarts = 2 }
-    @{ Max = 104; TimeoutSecs = 3600; Restarts = 1 }
-    @{ Max = 160; TimeoutSecs = 3600; Restarts = 1 }
+    @{ Max = 56;  TimeoutSecs = 60;   Restarts = 64 }
+    @{ Max = 64;  TimeoutSecs = 180;  Restarts = 32 }
+    @{ Max = 72;  TimeoutSecs = 600;  Restarts = 16 }
+    @{ Max = 80;  TimeoutSecs = 1200; Restarts = 8 }
+    @{ Max = 92;  TimeoutSecs = 1800; Restarts = 8 }
+    @{ Max = 104; TimeoutSecs = 3600; Restarts = 4 }
+    @{ Max = 160; TimeoutSecs = 3600; Restarts = 4 }
 )
 $tier = $tiers | Where-Object { $Bits -le $_.Max } | Select-Object -First 1
 
@@ -91,7 +91,7 @@ if (-not (Test-Path $exe)) {
 
 $argList = @(
     # for seed replay/verification (always use CPU for this)
-    # "--seed", "BE5E52F3CFD5F6E4000000000000000000000000",
+    # "--seed", "1DAF2CA400000000000000000000000000000000",
     # "--trials", "1",
     # "--gpu-restarts", "1",
 
