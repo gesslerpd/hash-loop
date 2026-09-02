@@ -39,7 +39,9 @@ param(
 
     [long]$MaxCycleLength,
 
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    [string]$Seed
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,15 +93,6 @@ if (-not (Test-Path $exe)) {
 
 $argList = @(
     "-v",
-    # for seed replay/verification (always use CPU for this)
-    # "--seed", "0000000000000000000000000000000000000000",
-    # "--trials", "1",
-    # "--gpu-restarts", "1",
-
-    "--gpu",
-    "--trials", $trials,
-    "--gpu-restarts", $restarts,
-
     "--bits", $Bits,
     "--gpu-batch-size", $batchSize,
     "--gpu-block-size", $blockSize,
@@ -108,6 +101,19 @@ $argList = @(
 )
 if ($MaxCycleLength) {
     $argList += @("--max-cycle-length", $MaxCycleLength)
+}
+if ($Seed) {
+    $argList += @(
+        "--seed", $Seed,
+        "--trials", "1",
+        "--gpu-restarts", "1"
+    )
+} else {
+    $argList += @(
+        "--gpu",
+        "--trials", $trials,
+        "--gpu-restarts", $restarts
+    )
 }
 $argList += $max
 
