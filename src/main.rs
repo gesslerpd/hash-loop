@@ -968,9 +968,9 @@ fn main() {
             };
             vec![seed]
         } else {
+            let mut rng = rand::thread_rng();
             (0..total_gpu_trials)
                 .map(|_| {
-                    let mut rng = rand::thread_rng();
                     let seed = truncate_hash(rng.gen(), opt.bits);
                     if opt.verbose > 2 {
                         println!("{} random hash seed", fmt_hash(&seed));
