@@ -58,8 +58,9 @@ struct Opt {
     #[structopt(long, default_value = "65536")]
     gpu_steps_per_dispatch: u32,
     /// Switch on verbosity
-    #[structopt(short)]
-    verbose: bool,
+    /// count the -vvv occurrences for verbosity level
+    #[structopt(short, parse(from_occurrences))]
+    verbose: u8,
 }
 
 fn fmt_hash(input: &[u8]) -> String {
@@ -597,7 +598,7 @@ fn cuda_find_cycles(
     batch_size: usize,
     block_size: u32,
     steps_per_dispatch: u32,
-    verbose: bool,
+    verbosity: u8,
     deadline: Option<Instant>,
 ) -> Result<Option<(Hash, u128)>, String> {
     use cudarc::driver::PushKernelArg;
@@ -617,7 +618,7 @@ fn cuda_find_cycles(
         .load_function("find_cycles_chunk")
         .map_err(|error| format!("could not load CUDA cycle kernel: {}", error))?;
     let stream = context.default_stream();
-    if verbose {
+    if verbosity > 0 {
         eprintln!(
             "CUDA device 0: {}",
             context.name().unwrap_or_else(|_| "unknown".to_string())
@@ -694,7 +695,7 @@ fn cuda_find_cycles(
                     on_new_best(cycle_hash, cycle_length);
                     best = Some((cycle_hash, cycle_length));
                     cycle_limit = cycle_length as u64;
-                } else if verbose
+                } else if verbosity > 0
                     && best.is_some_and(|(_, best_length)| cycle_length == best_length)
                 {
                     on_new_best(cycle_hash, cycle_length);
@@ -714,7 +715,7 @@ fn cuda_benchmark(
     batch_size: usize,
     block_size: u32,
     iterations: u32,
-    verbose: bool,
+    verbosity: u8,
 ) -> Result<(u128, f64, u32), String> {
     use cudarc::driver::PushKernelArg;
 
@@ -729,7 +730,7 @@ fn cuda_benchmark(
         .load_function("benchmark_hashes")
         .map_err(|error| format!("could not load CUDA benchmark kernel: {}", error))?;
     let stream = context.default_stream();
-    if verbose {
+    if verbosity > 0 {
         eprintln!(
             "CUDA device 0: {}",
             context.name().unwrap_or_else(|_| "unknown".to_string())
@@ -1032,7 +1033,7 @@ fn main() {
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let seed = truncate_hash(rng.gen(), opt.bits);
-                if opt.verbose {
+                if opt.verbose > 0 {
                     println!("{} random hash seed", fmt_hash(&seed));
                 }
 
@@ -1062,6 +1063,26 @@ fn main() {
             cycle_length,
             reported_trials
         );
+        if opt.verbose > 1 {
+            // add the index within the cycle
+            let mut current = cycle_hash;
+            let mut i: u128 = 1;
+            loop {
+                println!(
+                    "{} {}-bit SHA-1 hash in cycle (index {})",
+                    fmt_hash(&current),
+                    opt.bits,
+                    i
+                );
+                std::io::stdout().flush().unwrap();
+                current = sha1_hash(&current, opt.bits);
+                if current == cycle_hash {
+                    assert_eq!(i, cycle_length, "cycle length mismatch");
+                    break;
+                }
+                i += 1;
+            }
+        }
     } else {
         eprintln!("no cycle found within the configured search limits");
         std::process::exit(1);
