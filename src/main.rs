@@ -968,13 +968,13 @@ fn main() {
             };
             vec![seed]
         } else {
+            let mut rng = rand::thread_rng();
             (0..total_gpu_trials)
                 .map(|_| {
-                    let mut rng = rand::thread_rng();
                     let seed = truncate_hash(rng.gen(), opt.bits);
-                    // if opt.verbose {
-                    //     println!("{} random hash seed", fmt_hash(&seed));
-                    // }
+                    if opt.verbose > 2 {
+                        println!("{} random hash seed", fmt_hash(&seed));
+                    }
                     seed
                 })
                 .collect()
@@ -1033,10 +1033,9 @@ fn main() {
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let seed = truncate_hash(rng.gen(), opt.bits);
-                if opt.verbose > 0 {
+                if opt.verbose > 2 {
                     println!("{} random hash seed", fmt_hash(&seed));
                 }
-
                 find_cycle(seed, opt.max, sample_deadline, |input| {
                     sha1_hash(input, opt.bits)
                 })
